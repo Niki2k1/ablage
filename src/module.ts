@@ -107,6 +107,14 @@ export default defineNuxtModule<ModuleOptions>({
         name: 'createS3Provider',
         from: resolver.resolve('./runtime/server/providers/s3'),
       },
+      {
+        name: 'createS3Client',
+        from: resolver.resolve('./runtime/server/providers/s3'),
+      },
+      {
+        name: 'createDrizzleProvider',
+        from: resolver.resolve('./runtime/server/providers/drizzle'),
+      },
     ]);
 
     // -------------------------------------------------------

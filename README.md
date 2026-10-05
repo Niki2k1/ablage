@@ -9,7 +9,7 @@ File storage module for Nuxt. Provides a server-side `useFileStorage()` composab
 
 ## Features
 
-- **Pluggable provider architecture** — use the built-in unstorage provider or bring your own (Prisma, Drizzle, etc.)
+- **Pluggable provider architecture** — built-in unstorage (default), S3 and Drizzle providers, or bring your own
 - **File versioning** — built-in version tracking, latest-version filtering, and duplicate detection
 - **External file sync** — two-way sync with external systems (Jira, SharePoint, etc.) via optional provider interface
 - **Zero-config default** — works out of the box with local filesystem storage, no database required
@@ -323,9 +323,57 @@ export default defineNitroPlugin(() => {
 
 > `createS3Provider` requires the optional [`aws4fetch`](https://github.com/mhart/aws4fetch) peer dependency (`npm i aws4fetch`). Pass a custom `client` to use a different transport or to unit-test without network.
 
+## Drizzle (metadata in your database)
+
+`createDrizzleProvider` keeps file metadata in a table of your own
+[Drizzle](https://orm.drizzle.team) database and the bytes in a blob store —
+S3/R2 via `createS3Client()`, or any mounted Nitro storage. It uses only
+Drizzle's core query builder, so it works with every dialect and driver on
+Drizzle 0.36+ and v1.
+
+```ts
+// server/db/schema.ts
+import { pgTable, text, jsonb, timestamp, index } from 'drizzle-orm/pg-core'
+
+export const filerFiles = pgTable('filer_files', {
+  id: text('id').primaryKey(),
+  groupId: text('group_id').notNull(),
+  metadata: jsonb('metadata'),
+  createdAt: timestamp('created_at'), // optional
+  updatedAt: timestamp('updated_at'), // optional
+}, t => [index('filer_files_group_id_idx').on(t.groupId)])
+```
+
+```ts
+// server/plugins/file-provider.ts  (with `filer: { provider: 'custom' }`)
+import { db } from '../utils/db'
+import { filerFiles } from '../db/schema'
+
+export default defineNitroPlugin(() => {
+  const { s3 } = useRuntimeConfig()
+  setFileStorageProvider(createDrizzleProvider({
+    db,
+    table: filerFiles,
+    blobs: createS3Client({
+      accessKeyId: s3.accessKeyId,
+      secretAccessKey: s3.secretAccessKey,
+      endpoint: s3.endpoint,
+      bucket: s3.bucket,
+    }),
+    // or a Nitro storage mount: blobs: 'documents'  (configure it under `nitro.storage`)
+    // columns: { id: 'id', groupId: 'groupId', metadata: 'metadata', createdAt: 'createdAt', updatedAt: 'updatedAt' },
+  }))
+})
+```
+
+- `columns` maps to the table's schema property names, so an existing table can be used. `createdAt`/`updatedAt` are filled in when the table has them.
+- With a Postgres `jsonb` metadata column, `findByMeta()` (`@>`) and `update()` (`||` merge) run in the database — add a GIN index on `metadata` for large tables. Other column types and dialects filter and merge in JS.
+- Bytes are stored at `<groupId>/data/<id>`, the same layout as the S3 and unstorage providers, so moving metadata into a database keeps existing files readable.
+- Requires the optional `drizzle-orm` peer dependency.
+
 ## Custom Provider
 
-For advanced use cases (database-backed metadata, external file sync), implement the `FileStorageProvider` interface and register it in a Nitro plugin:
+For advanced use cases (other databases, external file sync), implement the `FileStorageProvider` interface and register it in a Nitro plugin:
 
 ```ts
 // nuxt.config.ts

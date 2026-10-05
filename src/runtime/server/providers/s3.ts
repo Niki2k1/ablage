@@ -241,6 +241,26 @@ function stripInternal(meta: InternalMeta | null): FileMeta {
   return rest as FileMeta;
 }
 
+/**
+ * Standalone {@link S3Client} (aws4fetch), e.g. as the `blobs` store of
+ * `createDrizzleProvider`. Keys are used as-is; `prefix` and `client` don't apply.
+ */
+export function createS3Client(
+  options: Omit<S3ProviderOptions, 'prefix' | 'client'>,
+): S3Client {
+  let clientPromise: Promise<S3Client> | undefined;
+  const getClient = () => (clientPromise ??= createAwsS3Client(options));
+  return {
+    put: async (key, body, contentType) => (await getClient()).put(key, body, contentType),
+    get: async (key) => (await getClient()).get(key),
+    head: async (key) => (await getClient()).head(key),
+    delete: async (key) => (await getClient()).delete(key),
+    async *listKeys(keyPrefix) {
+      yield* (await getClient()).listKeys(keyPrefix);
+    },
+  };
+}
+
 /** Default {@link S3Client} backed by aws4fetch (SigV4 over fetch). */
 async function createAwsS3Client(options: S3ProviderOptions): Promise<S3Client> {
   for (const key of ['accessKeyId', 'secretAccessKey', 'endpoint', 'bucket'] as const) {
