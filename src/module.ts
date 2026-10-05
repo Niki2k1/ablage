@@ -107,6 +107,18 @@ export default defineNuxtModule<ModuleOptions>({
         name: 'createS3Provider',
         from: resolver.resolve('./runtime/server/providers/s3'),
       },
+      {
+        name: 'createS3Client',
+        from: resolver.resolve('./runtime/server/providers/s3'),
+      },
+      {
+        name: 'createDrizzleProvider',
+        from: resolver.resolve('./runtime/server/providers/drizzle'),
+      },
+      {
+        name: 'importUnstorageMetadata',
+        from: resolver.resolve('./runtime/server/providers/drizzle'),
+      },
     ]);
 
     // -------------------------------------------------------
@@ -247,17 +259,19 @@ export default defineNuxtModule<ModuleOptions>({
         `export const tusExpiration = ${JSON.stringify(tusOpt.expiration ?? 0)};`,
       ].join('\n');
 
-      // Auto-mount filesystem storage when using the built-in unstorage
-      // provider. We mount via a Nitro plugin that ships our own fs driver
+      // Auto-mount filesystem storage for the built-in unstorage provider, and
+      // for custom providers that keep bytes in it (e.g. createDrizzleProvider
+      // with `blobs: storageName`). Mounting is lazy — nothing touches disk
+      // until a write. We mount via a Nitro plugin that ships our own fs driver
       // (rather than `nitroConfig.storage` with `driver: 'fsLite'`) because
       // unstorage's fs-lite relies on a userspace `ensuredir` recursion that
       // intermittently fails with ENOENT on first writes to a new key path.
       // Our driver uses the kernel's atomic `mkdir(..., { recursive: true })`.
+      nitroConfig.plugins = nitroConfig.plugins || [];
+      nitroConfig.plugins.push(
+        resolver.resolve('./runtime/server/plugins/default-storage')
+      );
       if (options.provider === 'unstorage') {
-        nitroConfig.plugins = nitroConfig.plugins || [];
-        nitroConfig.plugins.push(
-          resolver.resolve('./runtime/server/plugins/default-storage')
-        );
         nitroConfig.plugins.push(
           resolver.resolve('./runtime/server/plugins/default-provider')
         );
