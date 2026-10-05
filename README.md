@@ -32,7 +32,8 @@ npx nuxi module add nuxt-filer
 export default defineNuxtConfig({
   modules: ['nuxt-filer'],
   filer: {
-    // Nitro storage mount name (default: 'documents')
+    // Nitro storage mount name (default: 'documents'). Mounted on the local fs
+    // for every provider unless you configure it yourself under `nitro.storage`.
     storageName: 'documents',
     // Base path for fs-lite driver (default: '.data/documents')
     storagePath: '.data/documents',
@@ -360,7 +361,7 @@ export default defineNitroPlugin(() => {
       endpoint: s3.endpoint,
       bucket: s3.bucket,
     }),
-    // or a Nitro storage mount: blobs: 'documents'  (configure it under `nitro.storage`)
+    // or keep bytes on disk in the module's fs storage: blobs: 'documents'  (= `filer.storageName`)
     // columns: { id: 'id', groupId: 'groupId', metadata: 'metadata', createdAt: 'createdAt', updatedAt: 'updatedAt' },
   }))
 })
@@ -370,6 +371,27 @@ export default defineNitroPlugin(() => {
 - With a Postgres `jsonb` metadata column, `findByMeta()` (`@>`) and `update()` (`||` merge) run in the database — add a GIN index on `metadata` for large tables. Other column types and dialects filter and merge in JS.
 - Bytes are stored at `<groupId>/data/<id>`, the same layout as the S3 and unstorage providers, so moving metadata into a database keeps existing files readable.
 - Requires the optional `drizzle-orm` peer dependency.
+
+### Migrating from the unstorage provider
+
+Point `blobs` at the existing mount (`blobs: 'documents'`) so the bytes stay
+where they are, then copy the metadata sidecars into the table once —
+`importUnstorageMetadata` keeps ids and timestamps and skips rows that already
+exist, so re-running it is safe:
+
+```ts
+// server/tasks/filer/import.ts  (run with `nuxi task run filer:import`)
+import { db } from '../../utils/db'
+import { filerFiles } from '../../db/schema'
+
+export default defineTask({
+  meta: { description: 'Copy nuxt-filer metadata into the database' },
+  async run() {
+    const result = await importUnstorageMetadata({ from: 'documents', db, table: filerFiles })
+    return { result } // { imported, skipped }
+  },
+})
+```
 
 ## Custom Provider
 

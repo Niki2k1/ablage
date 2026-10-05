@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import type { PGlite } from '@electric-sql/pglite';
-import { createDrizzleProvider, type BlobStore } from '../../src/runtime/server/providers/drizzle';
+import type { Storage } from 'unstorage';
+import {
+  createDrizzleProvider,
+  importUnstorageMetadata,
+  type BlobStore,
+} from '../../src/runtime/server/providers/drizzle';
+import { createUnstorageProvider } from '../../src/runtime/server/providers/unstorage';
 import type { FileMeta } from '../../src/runtime/types';
 
 /** The drizzle-orm entry points the suite needs, from whichever version is under test. */
@@ -8,6 +14,8 @@ export interface DrizzleModules {
   pgCore: typeof import('drizzle-orm/pg-core');
   drizzle: typeof import('drizzle-orm/pglite').drizzle;
   PGlite: typeof PGlite;
+  /** Root storage behind the mocked `useStorage()`, with `documents` mounted. */
+  storage: Storage;
 }
 
 const meta = (over: Partial<FileMeta> = {}): FileMeta => ({
@@ -39,7 +47,7 @@ function memoryBlobs() {
  * with a `jsonb` metadata column (queries pushed into SQL) and once with plain
  * `json` (the portable in-JS path every other dialect takes).
  */
-export function runDrizzleSuite({ pgCore, drizzle, PGlite }: DrizzleModules) {
+export function runDrizzleSuite({ pgCore, drizzle, PGlite, storage }: DrizzleModules) {
   const { pgTable, text, json, jsonb, timestamp } = pgCore;
 
   for (const metaType of ['jsonb', 'json'] as const) {
@@ -185,5 +193,56 @@ export function runDrizzleSuite({ pgCore, drizzle, PGlite }: DrizzleModules) {
     const file = await provider.get('o', id);
     expect(file).toMatchObject({ id, groupId: 'o', meta: { name: 'n' } });
     expect(file!.createdAt).toBeUndefined();
+  });
+
+  describe('with a Nitro storage mount', () => {
+    const table = pgTable('filer_files', {
+      id: text('id').primaryKey(),
+      groupId: text('group_id').notNull(),
+      metadata: jsonb('metadata'),
+      createdAt: timestamp('created_at'),
+      updatedAt: timestamp('updated_at'),
+    });
+    const setup = async () => {
+      await storage.clear('documents');
+      const client = new PGlite();
+      await client.exec(`create table filer_files (
+        id text primary key, group_id text not null, metadata jsonb,
+        created_at timestamp, updated_at timestamp
+      )`);
+      return drizzle({ client });
+    };
+
+    it('stores bytes in the mount, keyed like the unstorage provider', async () => {
+      const provider = createDrizzleProvider({ db: await setup(), table, blobs: 'documents' });
+      const { id } = await provider.create('g', Buffer.from('hi'), undefined);
+
+      expect(await storage.hasItem(`documents:g:data:${id}`)).toBe(true);
+      expect((await provider.getData('g', id))?.toString()).toBe('hi');
+    });
+
+    it('refuses an unmounted storage instead of falling back to memory', async () => {
+      const provider = createDrizzleProvider({ db: await setup(), table, blobs: 'nope' });
+      await expect(provider.create('g', Buffer.from('hi'))).rejects.toThrow(/"nope" is not mounted/);
+    });
+
+    it('imports unstorage metadata so existing files keep working', async () => {
+      const db = await setup();
+      const legacy = createUnstorageProvider('documents');
+      const { id } = await legacy.create('organization:5', Buffer.from('logo'), meta({ mime: 'image/svg+xml' }));
+      await legacy.create('ticket-1', Buffer.from('x'), meta({ name: 'a.pdf' }));
+      const before = (await legacy.get('organization:5', id))!;
+
+      expect(await importUnstorageMetadata({ from: 'documents', db, table })).toEqual({ imported: 2, skipped: 0 });
+      expect(await importUnstorageMetadata({ from: 'documents', db, table })).toEqual({ imported: 0, skipped: 2 });
+
+      const provider = createDrizzleProvider({ db, table, blobs: 'documents' });
+      const file = (await provider.get('organization:5', id))!;
+      expect(file.data?.toString()).toBe('logo');
+      expect(file.meta).toEqual(before.meta);
+      expect(file.createdAt).toEqual(before.createdAt);
+      expect(await provider.getMeta(id)).toMatchObject({ mime: 'image/svg+xml' });
+      expect((await provider.list('ticket-1')).map((f) => f.meta.name)).toEqual(['a.pdf']);
+    });
   });
 }

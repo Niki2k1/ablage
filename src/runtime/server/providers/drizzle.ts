@@ -108,6 +108,62 @@ function storageBlobStore(name: string): BlobStore {
 }
 
 /**
+ * Resolve the configured column names against the table once `drizzle-orm`
+ * is loaded (lazily, so apps without it never import it).
+ */
+function bindTable(table: Table, columnNames: DrizzleProviderOptions['columns'], caller: string) {
+  const names = {
+    id: 'id',
+    groupId: 'groupId',
+    metadata: 'metadata',
+    createdAt: 'createdAt',
+    updatedAt: 'updatedAt',
+    ...columnNames,
+  };
+  const columns = table as unknown as Record<string, unknown>;
+
+  function init(orm: DrizzleOrm) {
+    const column = (name: string, required = true) => {
+      const value = columns[name];
+      if (orm.is(value, orm.Column)) return value;
+      if (required) {
+        throw new Error(`[nuxt-filer] ${caller}: table has no column "${name}"`);
+      }
+      return undefined;
+    };
+    const id = column(names.id)!;
+    const groupId = column(names.groupId)!;
+    const metadata = column(names.metadata)!;
+    return {
+      orm,
+      id,
+      groupId,
+      metadata,
+      hasCreatedAt: !!column(names.createdAt, false),
+      hasUpdatedAt: !!column(names.updatedAt, false),
+      jsonb: metadata.columnType === 'PgJsonb',
+    };
+  }
+
+  let setup: Promise<ReturnType<typeof init>> | undefined;
+  const ready = () =>
+    (setup ??= import('drizzle-orm')
+      .catch(() => {
+        throw new Error(
+          `[nuxt-filer] ${caller} needs the optional "drizzle-orm" dependency. Install it: npm i drizzle-orm`,
+        );
+      })
+      .then(init));
+
+  return { names, ready };
+}
+
+// Same layout as the unstorage (`group:data:id`) and S3 (`group/data/id`)
+// providers, so switching metadata to a database keeps existing bytes.
+const seg = (value: string) => value.replace(/^\/+|\/+$/g, '');
+const blobKey = (groupId: string, id: string) => `${seg(groupId)}/data/${seg(id)}`;
+
+/**
  * Drizzle-backed {@link FileStorageProvider}: metadata lives in a database
  * table, bytes in a {@link BlobStore}. Uses only Drizzle's core query builder,
  * which is unchanged between v0.x and v1.
@@ -119,55 +175,7 @@ function storageBlobStore(name: string): BlobStore {
 export function createDrizzleProvider(options: DrizzleProviderOptions): FileStorageProvider {
   const { db, table } = options;
   const blobs = typeof options.blobs === 'string' ? storageBlobStore(options.blobs) : options.blobs;
-  const names = {
-    id: 'id',
-    groupId: 'groupId',
-    metadata: 'metadata',
-    createdAt: 'createdAt',
-    updatedAt: 'updatedAt',
-    ...options.columns,
-  };
-  const columns = table as unknown as Record<string, unknown>;
-
-  // Same layout as the unstorage (`group:data:id`) and S3 (`group/data/id`)
-  // providers, so switching metadata to a database keeps existing bytes.
-  const seg = (value: string) => value.replace(/^\/+|\/+$/g, '');
-  const blobKey = (groupId: string, id: string) => `${seg(groupId)}/data/${seg(id)}`;
-
-  let setup: Promise<ReturnType<typeof init>> | undefined;
-  const ready = () =>
-    (setup ??= import('drizzle-orm')
-      .catch(() => {
-        throw new Error(
-          '[nuxt-filer] createDrizzleProvider needs the optional "drizzle-orm" dependency. Install it: npm i drizzle-orm',
-        );
-      })
-      .then(init));
-
-  function init(orm: DrizzleOrm) {
-    const column = (name: string, required = true) => {
-      const value = columns[name];
-      if (orm.is(value, orm.Column)) return value;
-      if (required) {
-        throw new Error(`[nuxt-filer] createDrizzleProvider: table has no column "${name}"`);
-      }
-      return undefined;
-    };
-    const id = column(names.id)!;
-    const groupId = column(names.groupId)!;
-    const metadata = column(names.metadata)!;
-    const createdAt = column(names.createdAt, false);
-    const updatedAt = column(names.updatedAt, false);
-    return {
-      orm,
-      id,
-      groupId,
-      metadata,
-      hasCreatedAt: !!createdAt,
-      hasUpdatedAt: !!updatedAt,
-      jsonb: metadata.columnType === 'PgJsonb',
-    };
-  }
+  const { names, ready } = bindTable(table, options.columns, 'createDrizzleProvider');
 
   const toStoredFile = (
     c: Awaited<ReturnType<typeof ready>>,
@@ -306,4 +314,66 @@ export function createDrizzleProvider(options: DrizzleProviderOptions): FileStor
       return row ? toStoredFile(c, row) : null;
     },
   };
+}
+
+export interface ImportUnstorageMetadataOptions {
+  /** Nitro storage mount the unstorage provider wrote to (e.g. `'documents'`). */
+  from: string;
+  db: DrizzleDatabase;
+  table: Table;
+  columns?: DrizzleProviderOptions['columns'];
+}
+
+/**
+ * One-off migration from the unstorage provider: copies its JSON metadata
+ * sidecars (`<groupId>:meta:<id>`) into the Drizzle table, keeping ids and
+ * timestamps. Bytes stay where they are — point `createDrizzleProvider`'s
+ * `blobs` at the same mount. Rows that already exist are skipped, so it is
+ * safe to re-run.
+ */
+export async function importUnstorageMetadata(
+  options: ImportUnstorageMetadataOptions,
+): Promise<{ imported: number; skipped: number }> {
+  const { db, table } = options;
+  const { names, ready } = bindTable(table, options.columns, 'importUnstorageMetadata');
+  const c = await ready();
+  const storage = useStorage(options.from);
+
+  const metaKeys = (await storage.getKeys()).filter((key) => key.includes(':meta:'));
+  let imported = 0;
+
+  for (let i = 0; i < metaKeys.length; i += 100) {
+    const batch = await Promise.all(
+      metaKeys.slice(i, i + 100).map(async (key) => {
+        const at = key.lastIndexOf(':meta:');
+        const raw = await storage.getItem<FileMeta & { _createdAt?: string; _updatedAt?: string }>(key);
+        return { groupId: key.slice(0, at), id: key.slice(at + ':meta:'.length), raw };
+      }),
+    );
+
+    const ids = batch.map((file) => file.id);
+    const existing: Row[] = await db
+      .select({ id: c.id })
+      .from(table)
+      .where(c.orm.inArray(c.id, ids));
+    const known = new Set(existing.map((row) => String(row.id)));
+
+    const rows = batch
+      .filter((file) => file.raw && !known.has(file.id))
+      .map(({ groupId, id, raw }) => {
+        const { _createdAt, _updatedAt, ...meta } = raw!;
+        return {
+          [names.id]: id,
+          [names.groupId]: groupId,
+          [names.metadata]: meta,
+          ...(c.hasCreatedAt ? { [names.createdAt]: asDate(_createdAt) ?? new Date() } : {}),
+          ...(c.hasUpdatedAt ? { [names.updatedAt]: asDate(_updatedAt) ?? new Date() } : {}),
+        };
+      });
+
+    if (rows.length) await db.insert(table).values(rows);
+    imported += rows.length;
+  }
+
+  return { imported, skipped: metaKeys.length - imported };
 }
