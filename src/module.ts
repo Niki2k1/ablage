@@ -104,6 +104,10 @@ export default defineNuxtModule<ModuleOptions>({
         from: resolver.resolve('./runtime/server/utils/upload'),
       },
       {
+        name: 'generateThumbnail',
+        from: resolver.resolve('./runtime/server/utils/thumbnail'),
+      },
+      {
         name: 'transformImage',
         from: resolver.resolve('./runtime/server/utils/image'),
       },

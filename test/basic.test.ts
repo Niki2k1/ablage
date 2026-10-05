@@ -3,6 +3,7 @@ import { rm } from 'node:fs/promises'
 import { describe, it, expect } from 'vitest'
 import sharp from 'sharp'
 import { setup, $fetch, fetch } from '@nuxt/test-utils/e2e'
+import { makePdf } from './utils/pdf'
 
 const fixtureRoot = fileURLToPath(new URL('./fixtures/basic', import.meta.url))
 
@@ -236,6 +237,13 @@ describe('nuxt-filer', async () => {
     expect(res.status).toBe(415)
     const body = await res.json()
     expect(body.message).toBe('File type of "Übersicht.pdf" is not allowed (allowed: image, .stl)')
+  })
+
+  it('generates a PDF preview inside the built server', async () => {
+    const form = new FormData()
+    form.append('file', new File([new Uint8Array(makePdf(200, 100))], 'doc.pdf', { type: 'application/pdf' }))
+    const thumb = await $fetch<{ mime: string, width: number, height: number }>('/api/files/thumbnail', { method: 'POST', body: form })
+    expect(thumb).toEqual({ mime: 'image/webp', width: 120, height: 60 })
   })
 
   it('processes an image at upload time via the transform option', async () => {
