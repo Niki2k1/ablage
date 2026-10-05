@@ -1,5 +1,15 @@
-import { defineEventHandler, useBase, type EventHandler } from 'h3';
-import { createIPX, createIPXH3Handler, type IPX, type IPXStorage } from 'ipx';
+import {
+  defineEventHandler,
+  sendWebResponse,
+  toWebRequest,
+  useBase,
+  type EventHandler,
+} from 'h3';
+// Namespace import: ipx 3 and 4 export different handler factories, and a named
+// import of one that doesn't exist fails at module link time (crashing the
+// server at boot) instead of letting us feature-detect.
+import * as ipxModule from 'ipx';
+import type { IPXStorage } from 'ipx';
 // @ts-expect-error virtual module injected by the module
 import { ipxRoute } from '#nuxt-filer-image';
 import { useFileStorageProvider } from '../provider';
@@ -10,9 +20,10 @@ import { useFileStorageProvider } from '../provider';
  * `groupId/fileId` — additional `/` characters in the group id are preserved.
  */
 function parseId(id: string): [string, string] | null {
-  const lastSlash = id.lastIndexOf('/');
-  if (lastSlash <= 0 || lastSlash === id.length - 1) return null;
-  return [id.slice(0, lastSlash), id.slice(lastSlash + 1)];
+  const trimmed = id.replace(/^\/+/, '');
+  const lastSlash = trimmed.lastIndexOf('/');
+  if (lastSlash <= 0 || lastSlash === trimmed.length - 1) return null;
+  return [trimmed.slice(0, lastSlash), trimmed.slice(lastSlash + 1)];
 }
 
 const filerStorage: IPXStorage = {
@@ -26,7 +37,9 @@ const filerStorage: IPXStorage = {
     if (!file) return undefined;
     const mtime = file.updatedAt ?? file.createdAt ?? new Date();
     return {
-      mtime,
+      // HTTP dates have second precision; without truncating, the
+      // `if-modified-since` echo is always "older" than mtime and never 304s.
+      mtime: new Date(Math.floor(mtime.getTime() / 1000) * 1000),
       maxAge: 60 * 60 * 24 * 365,
     };
   },
@@ -41,20 +54,42 @@ const filerStorage: IPXStorage = {
   },
 };
 
-let _handler: EventHandler | null = null;
-let _ipx: IPX | null = null;
-function getHandler(): EventHandler {
-  if (!_handler) {
-    _ipx = createIPX({ storage: filerStorage });
-    // IPX expects to see `/<modifiers>/<groupId>/<fileId>`, so strip the
-    // configured base prefix first. We delegate to h3's `useBase` rather than
-    // assigning `event.path` — `event.path` is a getter-only accessor (it
-    // reads back `event._path || req.url`), so writing to it throws
-    // "Cannot set property path ... which has only a getter". `useBase`
-    // rewrites `_path`/`req.url` for the inner handler and restores them after.
-    _handler = useBase(ipxRoute, createIPXH3Handler(_ipx));
+type IPX4 = {
+  createIPXFetchHandler: (
+    ipx: ReturnType<typeof ipxModule.createIPX>,
+    opts?: { parseURL?: (url: string) => unknown },
+  ) => (request: Request) => Response | Promise<Response>;
+  parseIPXURL: (url: string) => unknown;
+};
+type IPX3 = {
+  createIPXH3Handler: (ipx: ReturnType<typeof ipxModule.createIPX>) => EventHandler;
+};
+
+function createHandler(): EventHandler {
+  const ipx = ipxModule.createIPX({ storage: filerStorage });
+  const ipx4 = ipxModule as unknown as Partial<IPX4>;
+
+  if (ipx4.createIPXFetchHandler && ipx4.parseIPXURL) {
+    // ipx 4: a fetch handler. Strip the route prefix from the URL it parses so
+    // it sees `/<modifiers>/<groupId>/<fileId>`.
+    const { parseIPXURL } = ipx4;
+    const fetchHandler = ipx4.createIPXFetchHandler(ipx, {
+      parseURL(url) {
+        const parsed = new URL(url);
+        parsed.pathname = parsed.pathname.slice(ipxRoute.length) || '/';
+        return parseIPXURL(parsed.href);
+      },
+    });
+    return defineEventHandler(async (event) =>
+      sendWebResponse(event, await fetchHandler(toWebRequest(event))),
+    );
   }
-  return _handler;
+
+  // ipx 3: an h3 handler. `useBase` rewrites the path for the inner handler
+  // (assigning `event.path` throws — it's a getter-only accessor).
+  return useBase(ipxRoute, (ipxModule as unknown as IPX3).createIPXH3Handler(ipx));
 }
 
-export default defineEventHandler((event) => getHandler()(event));
+let _handler: EventHandler | null = null;
+
+export default defineEventHandler((event) => (_handler ??= createHandler())(event));

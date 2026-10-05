@@ -17,13 +17,13 @@ const MIME_BY_FORMAT: Record<string, string> = {
 
 // `sharp` is an optional peer dependency — resolve it lazily and cache the
 // module so unrelated installs never pay for the native binary.
-type SharpModule = typeof import('sharp');
+type SharpModule = typeof import('sharp').default;
 let sharpModule: SharpModule | undefined;
 
 async function loadSharp(): Promise<SharpModule> {
   if (sharpModule) return sharpModule;
   try {
-    sharpModule = (await import('sharp')).default as unknown as SharpModule;
+    sharpModule = (await import('sharp')).default;
   }
   catch {
     throw new Error(
