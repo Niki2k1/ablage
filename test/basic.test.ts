@@ -223,6 +223,21 @@ describe('nuxt-filer', async () => {
     expect(files).toEqual([])
   })
 
+  it('validates uploads with readUploadedFile', async () => {
+    const form = new FormData()
+    form.append('file', new File([new Uint8Array(16)], 'model.stl', { type: '' }))
+    form.append('group', 'models')
+    const ok = await $fetch<{ name: string, type: string, size: number, group: string }>('/api/files/upload-validated', { method: 'POST', body: form })
+    expect(ok).toMatchObject({ name: 'model.stl', type: 'application/octet-stream', size: 16, group: 'models' })
+
+    const rejected = new FormData()
+    rejected.append('file', new File([new Uint8Array(16)], 'Übersicht.pdf', { type: 'application/pdf' }))
+    const res = await fetch('/api/files/upload-validated', { method: 'POST', body: rejected })
+    expect(res.status).toBe(415)
+    const body = await res.json()
+    expect(body.message).toBe('File type of "Übersicht.pdf" is not allowed (allowed: image, .stl)')
+  })
+
   it('processes an image at upload time via the transform option', async () => {
     const png = await sharp({
       create: {

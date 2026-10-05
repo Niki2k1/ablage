@@ -139,6 +139,35 @@ const res = await transformImage(buffer, { width: 64, format: 'webp' })
 | `external?.push(groupId, id, data, meta)` | Push to external system |
 | `external?.pull(groupId, ref)` | Pull from external system |
 
+### Validating uploads with `readUploadedFile()`
+
+Reads a file from a `multipart/form-data` request and validates it, throwing a
+400 (no file), 413 (too large) or 415 (type not allowed) with a message naming
+the file and the limit:
+
+```ts
+// server/api/models.post.ts
+export default defineEventHandler(async (event) => {
+  const file = await readUploadedFile(event, {
+    types: ['image', '.stl', '.3mf', 'application/pdf'],
+    maxSize: '50MB',
+  })
+  const id = await useFileStorage().upload(file.fields.group ?? 'uploads', file.data, {
+    meta: { name: file.name, mime: file.type, type: 'model', version: 1 },
+  })
+  return { id }
+})
+```
+
+- `types` uses the syntax of the HTML `accept` attribute: exact MIME types
+  (`'image/png'`), families (`'image'` or `'image/*'`) and extensions
+  (`'.stl'`). Extensions help for formats browsers send without a MIME type.
+- `maxSize` takes bytes or a string like `'500KB'`, `'2MB'` (1024-based). An
+  oversized request is rejected from its `Content-Length` before the body is read.
+- `field` picks the form field (default `'file'`); the result's `fields` holds
+  the other, non-file form fields.
+- `readUploadedFiles(event, { ..., max })` reads several files from the same field.
+
 ### Serving raw files with `sendStoredFile()`
 
 The IPX route serves **images** with full HTTP caching. For everything else — original PDFs, non-image downloads, the unprocessed bytes of any file — `sendStoredFile()` streams a stored file back through an H3 event with the same revalidation story.
