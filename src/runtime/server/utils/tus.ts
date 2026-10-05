@@ -9,7 +9,7 @@ import {
 } from '@tus/server';
 import { FileStore } from '@tus/file-store';
 // @ts-expect-error virtual module injected by the module
-import { tusRoute, tusStagingDir, tusMaxSize, tusExpiration } from '#nuxt-filer-tus';
+import { tusRoute, tusStagingDir, tusMaxSize, tusExpiration } from '#ablage-tus';
 import type { FileMeta, TusPromoteOptions } from '../../../runtime/types';
 import { useFileStorage } from './storage';
 
@@ -37,7 +37,7 @@ let expirationTimer: ReturnType<typeof setInterval> | undefined;
 export function setTusServerOptions(options: TusServerUserOptions) {
   if (server) {
     consola.warn(
-      'nuxt-filer: setTusServerOptions() called after the tus server was created — the options are ignored. Call it from a Nitro plugin instead.'
+      'ablage: setTusServerOptions() called after the tus server was created — the options are ignored. Call it from a Nitro plugin instead.'
     );
     return;
   }
@@ -113,7 +113,7 @@ export function useTusStaging() {
     const readable = store as Partial<Pick<FileStore, 'read'>>;
     if (typeof readable.read !== 'function') {
       throw new TypeError(
-        'nuxt-filer: the configured tus datastore does not support read() — useTusStaging() requires a FileStore-compatible datastore'
+        'ablage: the configured tus datastore does not support read() — useTusStaging() requires a FileStore-compatible datastore'
       );
     }
     try {

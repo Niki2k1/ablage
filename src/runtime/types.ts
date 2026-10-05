@@ -72,7 +72,7 @@ export interface TusUploadState {
 }
 
 export interface UseTusUploadOptions {
-  /** tus endpoint. Defaults to the route configured via `filer.tus.route`. */
+  /** tus endpoint. Defaults to the route configured via `ablage.tus.route`. */
   endpoint?: string;
   /**
    * Extra tus metadata per file, merged over the default

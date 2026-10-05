@@ -85,8 +85,8 @@ export async function generateThumbnail(
       warnOnce(
         type,
         type === 'application/pdf'
-          ? '[nuxt-filer] generateThumbnail: PDF previews need the optional dependencies `unpdf`, `@napi-rs/canvas` and `sharp`.'
-          : '[nuxt-filer] generateThumbnail: image previews need the optional dependency `sharp`.',
+          ? '[ablage] generateThumbnail: PDF previews need the optional dependencies `unpdf`, `@napi-rs/canvas` and `sharp`.'
+          : '[ablage] generateThumbnail: image previews need the optional dependency `sharp`.',
       );
     }
     return null;

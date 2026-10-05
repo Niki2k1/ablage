@@ -17,10 +17,10 @@ const port = 3999
 describe.skipIf(!imgproxyURL)(`image service: ${service}`, async () => {
   process.env.FILER_TEST_IMAGE_SERVICE = service
   await rm(fileURLToPath(new URL('../.data/test-image-service', import.meta.url)), { recursive: true, force: true })
-  process.env.NUXT_FILER_IMAGE_BASE_URL = imgproxyURL
-  process.env.NUXT_FILER_IMAGE_KEY = process.env.IMGPROXY_KEY ?? ''
-  process.env.NUXT_FILER_IMAGE_SALT = process.env.IMGPROXY_SALT ?? ''
-  process.env.NUXT_FILER_IMAGE_SOURCE_URL = `http://127.0.0.1:${port}`
+  process.env.NUXT_ABLAGE_IMAGE_BASE_URL = imgproxyURL
+  process.env.NUXT_ABLAGE_IMAGE_KEY = process.env.IMGPROXY_KEY ?? ''
+  process.env.NUXT_ABLAGE_IMAGE_SALT = process.env.IMGPROXY_SALT ?? ''
+  process.env.NUXT_ABLAGE_IMAGE_SOURCE_URL = `http://127.0.0.1:${port}`
 
   await setup({
     rootDir: fileURLToPath(new URL('./fixtures/image-service', import.meta.url)),
@@ -51,11 +51,11 @@ describe.skipIf(!imgproxyURL)(`image service: ${service}`, async () => {
       body: { groupId: 'organization:5', content: png.toString('base64'), meta: { name: 'logo.png', mime: 'image/png', type: 'image', version: 1 } },
     })
 
-    const original = await fetch(`/_filer-ipx/_/organization:5/${id}`)
+    const original = await fetch(`/_ablage/image/_/organization:5/${id}`)
     expect(original.headers.get('content-type')).toBe('image/png')
     expect(Buffer.from(await original.arrayBuffer()).equals(png)).toBe(true)
 
-    const redirect = await fetch(`/_filer-ipx/s_100x100,f_webp/organization:5/${id}`, { redirect: 'manual' })
+    const redirect = await fetch(`/_ablage/image/s_100x100,f_webp/organization:5/${id}`, { redirect: 'manual' })
     expect(redirect.status).toBe(302)
     const location = redirect.headers.get('location')!
     expect(location.startsWith(`${imgproxyURL}/`)).toBe(true)

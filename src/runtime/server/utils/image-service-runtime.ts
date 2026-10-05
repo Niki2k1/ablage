@@ -1,7 +1,7 @@
 import { imageMeta } from 'image-meta';
 import { useRuntimeConfig } from 'nitropack/runtime';
 // @ts-expect-error virtual module injected by the module
-import { imageService, ipxRoute } from '#nuxt-filer-image';
+import { imageService, ipxRoute } from '#ablage-image';
 import type {
   FileMeta,
   ImageTransformOptions,
@@ -16,15 +16,15 @@ import {
 } from './image-service';
 
 /** Group used to stage originals while the service transforms them at upload time. */
-const STAGING_GROUP = '_filer-transform';
+const STAGING_GROUP = '_ablage-transform';
 
 /** The configured external service, or `null` when images are processed locally. */
 export function useImageService(): ImageServiceConfig | null {
   if (imageService !== 'imgproxy' && imageService !== 'ipx') return null;
-  const config = (useRuntimeConfig() as { filer?: { image?: Partial<ImageServiceConfig> } }).filer?.image ?? {};
+  const config = (useRuntimeConfig() as { ablage?: { image?: Partial<ImageServiceConfig> } }).ablage?.image ?? {};
   if (!config.baseURL) {
     throw new Error(
-      `[nuxt-filer] image service "${imageService}" needs a base URL: set \`filer.image.baseURL\` or NUXT_FILER_IMAGE_BASE_URL.`,
+      `[ablage] image service "${imageService}" needs a base URL: set \`ablage.image.baseURL\` or NUXT_ABLAGE_IMAGE_BASE_URL.`,
     );
   }
   return {
@@ -50,7 +50,7 @@ export async function transformWithService(
 ): Promise<ImageTransformResult> {
   if (!config.sourceURL) {
     throw new Error(
-      '[nuxt-filer] upload-time transforms via an image service need `filer.image.sourceURL` (NUXT_FILER_IMAGE_SOURCE_URL): the origin the service can reach this app on.',
+      '[ablage] upload-time transforms via an image service need `ablage.image.sourceURL` (NUXT_ABLAGE_IMAGE_SOURCE_URL): the origin the service can reach this app on.',
     );
   }
   const provider = useFileStorageProvider();
@@ -68,7 +68,7 @@ export async function transformWithService(
     );
     const response = await fetch(url);
     if (!response.ok) {
-      throw new Error(`[nuxt-filer] image service responded ${response.status} for ${url}`);
+      throw new Error(`[ablage] image service responded ${response.status} for ${url}`);
     }
     const bytes = Buffer.from(await response.arrayBuffer());
     const info = imageMeta(bytes);

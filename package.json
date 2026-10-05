@@ -1,14 +1,14 @@
 {
-  "name": "nuxt-filer",
+  "name": "ablage",
   "version": "0.0.18",
   "description": "File storage module for Nuxt",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Niki2k1/nuxt-filer.git"
+    "url": "git+https://github.com/Niki2k1/ablage.git"
   },
-  "homepage": "https://github.com/Niki2k1/nuxt-filer#readme",
+  "homepage": "https://github.com/Niki2k1/ablage#readme",
   "bugs": {
-    "url": "https://github.com/Niki2k1/nuxt-filer/issues"
+    "url": "https://github.com/Niki2k1/ablage/issues"
   },
   "license": "MIT",
   "author": "Niki2k1",
@@ -36,6 +36,9 @@
     "dist",
     "src/runtime"
   ],
+  "engines": {
+    "node": "^22.22.3 || ^24.15.0 || >=26.0.0"
+  },
   "scripts": {
     "prepack": "nuxt-module-build prepare && nuxt-module-build build",
     "dev": "npm run dev:prepare && nuxi dev playground",
@@ -48,7 +51,7 @@
     "test:types": "vue-tsc --noEmit && cd playground && vue-tsc --noEmit"
   },
   "dependencies": {
-    "@nuxt/kit": "^4.4.2",
+    "@nuxt/kit": "^4.6.0",
     "@tus/file-store": "^2.1.0",
     "@tus/server": "^2.4.1",
     "consola": "^3.4.2",
@@ -63,7 +66,7 @@
     "@nuxt/eslint-config": "^1.15.2",
     "@nuxt/image": "^2.1.0",
     "@nuxt/module-builder": "^1.0.2",
-    "@nuxt/schema": "^4.4.2",
+    "@nuxt/schema": "^4.6.0",
     "@nuxt/test-utils": "^4.0.0",
     "@types/node": "latest",
     "aws4fetch": "^1.0.20",
@@ -72,7 +75,7 @@
     "drizzle-orm-v1": "npm:drizzle-orm@1.0.0-rc.4",
     "eslint": "^10.1.0",
     "ipx": "^4.0.0-beta.1",
-    "nuxt": "^4.4.2",
+    "nuxt": "^4.6.0",
     "sharp": "^0.35.5",
     "typescript": "~6.0.2",
     "unpdf": "^1.8.1",

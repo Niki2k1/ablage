@@ -1,6 +1,6 @@
 import { defineEventHandler, createError, getRequestURL, sendRedirect, setResponseHeader } from 'h3';
 // @ts-expect-error virtual module injected by the module
-import { ipxRoute } from '#nuxt-filer-image';
+import { ipxRoute } from '#ablage-image';
 import { sendStoredFile } from '../utils/send';
 import { imageServiceURL, parseModifiers, sourceURL } from '../utils/image-service';
 import { useImageService } from '../utils/image-service-runtime';

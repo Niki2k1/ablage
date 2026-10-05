@@ -1,10 +1,10 @@
 import { defineNitroPlugin, useStorage } from 'nitropack/runtime';
 // @ts-expect-error virtual module
-import { storageName, storagePath } from '#nuxt-filer-options';
+import { storageName, storagePath } from '#ablage-options';
 import fsDriver from '../drivers/fs';
 
 /**
- * Mount the default filesystem-backed storage for nuxt-filer. We mount
+ * Mount the default filesystem-backed storage for ablage. We mount
  * via a Nitro plugin rather than `nitroConfig.storage` so that our
  * custom fs driver is bundled with the plugin and there is no runtime
  * module resolution against the package's `dist/`. A mount the app already

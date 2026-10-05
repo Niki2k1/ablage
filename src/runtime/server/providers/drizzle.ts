@@ -89,7 +89,7 @@ function storageBlobStore(name: string): BlobStore {
     // which would lose every file on restart.
     if (!useStorage().getMount(name).base) {
       throw new Error(
-        `[nuxt-filer] createDrizzleProvider: Nitro storage "${name}" is not mounted. Configure it under \`nitro.storage\`.`,
+        `[ablage] createDrizzleProvider: Nitro storage "${name}" is not mounted. Configure it under \`nitro.storage\`.`,
       );
     }
     return useStorage(name);
@@ -127,7 +127,7 @@ function bindTable(table: Table, columnNames: DrizzleProviderOptions['columns'],
       const value = columns[name];
       if (orm.is(value, orm.Column)) return value;
       if (required) {
-        throw new Error(`[nuxt-filer] ${caller}: table has no column "${name}"`);
+        throw new Error(`[ablage] ${caller}: table has no column "${name}"`);
       }
       return undefined;
     };
@@ -150,7 +150,7 @@ function bindTable(table: Table, columnNames: DrizzleProviderOptions['columns'],
     (setup ??= import('drizzle-orm')
       .catch(() => {
         throw new Error(
-          `[nuxt-filer] ${caller} needs the optional "drizzle-orm" dependency. Install it: npm i drizzle-orm`,
+          `[ablage] ${caller} needs the optional "drizzle-orm" dependency. Install it: npm i drizzle-orm`,
         );
       })
       .then(init));

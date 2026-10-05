@@ -11,7 +11,7 @@ import {
 import * as ipxModule from 'ipx';
 import type { IPXStorage } from 'ipx';
 // @ts-expect-error virtual module injected by the module
-import { ipxRoute } from '#nuxt-filer-image';
+import { ipxRoute } from '#ablage-image';
 import { headStoredFile, useFileStorageProvider } from '../provider';
 
 /**
@@ -26,8 +26,8 @@ function parseId(id: string): [string, string] | null {
   return [trimmed.slice(0, lastSlash), trimmed.slice(lastSlash + 1)];
 }
 
-const filerStorage: IPXStorage = {
-  name: 'nuxt-filer',
+const ablageStorage: IPXStorage = {
+  name: 'ablage',
   async getMeta(id) {
     const parsed = parseId(id);
     if (!parsed) return undefined;
@@ -66,7 +66,7 @@ type IPX3 = {
 };
 
 function createHandler(): EventHandler {
-  const ipx = ipxModule.createIPX({ storage: filerStorage });
+  const ipx = ipxModule.createIPX({ storage: ablageStorage });
   const ipx4 = ipxModule as unknown as Partial<IPX4>;
 
   if (ipx4.createIPXFetchHandler && ipx4.parseIPXURL) {
