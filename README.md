@@ -117,6 +117,34 @@ const res = await transformImage(buffer, { width: 64, format: 'webp' })
 
 > Image processing requires the optional [`sharp`](https://sharp.pixelplumbing.com/) peer dependency. Install it (`npm i sharp`) only if you use `transform` / `transformImage()` — calling them without `sharp` throws a clear error. Without a `transform`, `upload()` stores the raw bytes unchanged and needs no extra dependency.
 
+### Thumbnails and PDF previews with `generateThumbnail()`
+
+Builds a preview image from a stored file: images are resized with Sharp, PDFs
+get a page (the first by default) rendered and then resized. It returns
+`null` instead of throwing for unsupported types, unreadable input, or missing
+optional dependencies, so it can run on every upload:
+
+```ts
+const file = await readUploadedFile(event)
+const id = await storage.upload('docs', file.data, { meta: { name: file.name, mime: file.type, type: 'document', version: 1 } })
+
+const thumb = await generateThumbnail(file.data, file.type, { width: 300, height: 200 })
+if (thumb) {
+  await storage.upload('docs', thumb.data, {
+    meta: { name: `thumb_${file.name}`, mime: thumb.mime, type: 'thumbnail', version: 1 },
+  })
+}
+```
+
+- Options are those of `transformImage()` plus `page` (PDF page, default `1`).
+  Defaults: a 300×300 `inside` box, `webp`, and the first frame only for
+  animated images (`animated: true` keeps animation).
+- Requires `sharp`; PDFs additionally need [`unpdf`](https://github.com/unjs/unpdf)
+  and `@napi-rs/canvas` (`npm i unpdf @napi-rs/canvas`). All are optional peer
+  dependencies; when one is missing, a warning is logged once and `null` returned.
+- On-request transforms (the IPX route, or imgproxy) can't render PDFs, so a
+  stored preview like this is the way to show one.
+
 ### `useFileStorage()` API
 
 | Method | Description |
