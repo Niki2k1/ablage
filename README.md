@@ -193,7 +193,7 @@ filer: {
 },
 ```
 
-`@nuxt/image` and `ipx` are declared as optional peer dependencies — they only need to be installed if you want to use this integration.
+`@nuxt/image` and `ipx` are declared as optional peer dependencies — they only need to be installed if you want to use this integration. Both ipx 3 and ipx 4 (pulled in by `@nuxt/image` 2.1+) are supported.
 
 ## Resumable uploads (tus)
 

@@ -59,7 +59,7 @@
     "@electric-sql/pglite": "^0.5.8",
     "@nuxt/devtools": "^3.2.4",
     "@nuxt/eslint-config": "^1.15.2",
-    "@nuxt/image": "^2.0.0",
+    "@nuxt/image": "^2.1.0",
     "@nuxt/module-builder": "^1.0.2",
     "@nuxt/schema": "^4.4.2",
     "@nuxt/test-utils": "^4.0.0",
@@ -69,9 +69,9 @@
     "drizzle-orm": "^0.45.3",
     "drizzle-orm-v1": "npm:drizzle-orm@1.0.0-rc.4",
     "eslint": "^10.1.0",
-    "ipx": "^3.1.1",
+    "ipx": "^4.0.0-beta.1",
     "nuxt": "^4.4.2",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.5",
     "typescript": "~6.0.2",
     "vitest": "^4.1.2",
     "vue-tsc": "^3.2.6"
@@ -80,8 +80,8 @@
     "@nuxt/image": "^2.0.0",
     "aws4fetch": "^1.0.20",
     "drizzle-orm": ">=0.36.0 <1.0.0 || >=1.0.0-0 <2.0.0",
-    "ipx": "^3.0.0",
-    "sharp": "^0.33.0 || ^0.34.0"
+    "ipx": "^3.0.0 || ^4.0.0-0",
+    "sharp": "^0.33.0 || ^0.34.0 || ^0.35.0"
   },
   "peerDependenciesMeta": {
     "@nuxt/image": {
