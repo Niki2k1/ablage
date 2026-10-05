@@ -67,6 +67,26 @@ export function createUnstorageProvider(
       };
     },
 
+    async head(groupId, id) {
+      const storage = getStorage();
+      const metaData = await storage.getItem<
+        FileMeta & { _createdAt?: string; _updatedAt?: string }
+      >(metaKey(groupId, id));
+      if (!metaData && !(await storage.hasItem(dataKey(groupId, id)))) return null;
+
+      return {
+        id,
+        groupId,
+        meta: stripInternal(metaData),
+        createdAt: metaData?._createdAt
+          ? new Date(metaData._createdAt)
+          : undefined,
+        updatedAt: metaData?._updatedAt
+          ? new Date(metaData._updatedAt)
+          : undefined,
+      };
+    },
+
     async getData(groupId, id) {
       return await getStorage().getItemRaw<Buffer>(dataKey(groupId, id));
     },

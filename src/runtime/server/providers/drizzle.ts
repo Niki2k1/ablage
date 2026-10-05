@@ -230,6 +230,15 @@ export function createDrizzleProvider(options: DrizzleProviderOptions): FileStor
       return { id, groupId, data, meta: { ...EMPTY_META } };
     },
 
+    async head(groupId, id) {
+      const c = await ready();
+      const row = await findRow(id, groupId);
+      if (row) return toStoredFile(c, row);
+      // No row: only bytes stored without metadata (e.g. not yet imported).
+      // The blob store has no existence check, so this rare path reads them.
+      return (await blobs.get(blobKey(groupId, id))) ? { id, groupId, meta: { ...EMPTY_META } } : null;
+    },
+
     async getData(groupId, id) {
       return blobs.get(blobKey(groupId, id));
     },

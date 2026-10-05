@@ -152,6 +152,11 @@ export interface FileStorageProvider {
     meta?: FileMeta
   ): Promise<{ id: string }>;
   get(groupId: string, id: string): Promise<StoredFile | null>;
+  /**
+   * Like {@link get} but without reading the bytes (`data` is undefined).
+   * Optional: when a provider doesn't implement it, callers fall back to `get()`.
+   */
+  head?(groupId: string, id: string): Promise<StoredFile | null>;
   getData(groupId: string, id: string): Promise<Buffer | null>;
   getMeta(id: string): Promise<FileMeta | null>;
   list(groupId: string): Promise<StoredFile[]>;

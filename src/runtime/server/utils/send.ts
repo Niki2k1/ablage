@@ -6,7 +6,7 @@ import {
   createError,
 } from 'h3';
 import type { StoredFile } from '../../../runtime/types';
-import { useFileStorageProvider } from '../provider';
+import { headStoredFile, useFileStorageProvider } from '../provider';
 
 export type { StoredFile };
 
@@ -27,9 +27,14 @@ export interface SendStoredFileOptions {
 
 const DEFAULT_MAX_AGE = 60 * 60 * 24 * 365; // 1 year, matching the IPX route.
 
-/** The mtime the IPX route also uses: prefer `updatedAt`, fall back to `createdAt`. */
+/**
+ * The mtime the IPX route also uses: prefer `updatedAt`, fall back to
+ * `createdAt`. Truncated to whole seconds like HTTP dates, so an echoed
+ * `if-modified-since` compares equal instead of looking older.
+ */
 function fileMtime(file: StoredFile): Date | undefined {
-  return file.updatedAt ?? file.createdAt ?? undefined;
+  const mtime = file.updatedAt ?? file.createdAt;
+  return mtime ? new Date(Math.floor(mtime.getTime() / 1000) * 1000) : undefined;
 }
 
 /**
@@ -77,7 +82,9 @@ export async function sendStoredFile(
 ): Promise<Buffer | null> {
   const provider = useFileStorageProvider();
 
-  const file = await provider.get(groupId, id);
+  // Metadata only, so a 304 never reads the bytes (with providers that
+  // implement `head()`; otherwise `get()` already loaded them and are reused).
+  const file = await headStoredFile(provider, groupId, id);
   if (!file) {
     throw createError({ statusCode: 404, statusMessage: 'File not found' });
   }
@@ -97,8 +104,10 @@ export async function sendStoredFile(
   // Conditional request handling — answer 304 before touching the bytes.
   const ifNoneMatch = getRequestHeader(event, 'if-none-match');
   const ifModifiedSince = getRequestHeader(event, 'if-modified-since');
-  const notModified = etag
-    ? ifNoneMatch === etag
+  // RFC 9110: if-none-match takes precedence; if-modified-since applies only
+  // when it's absent.
+  const notModified = ifNoneMatch
+    ? !!etag && ifNoneMatch === etag
     : !!lastModified
       && !!ifModifiedSince
       && lastModified.getTime() <= Date.parse(ifModifiedSince);
@@ -121,7 +130,7 @@ export async function sendStoredFile(
     )
   );
 
-  const data = await provider.getData(groupId, id);
+  const data = file.data ?? (await provider.getData(groupId, id));
   if (!data) {
     throw createError({ statusCode: 404, statusMessage: 'File not found' });
   }
