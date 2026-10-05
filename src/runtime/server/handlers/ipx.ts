@@ -12,7 +12,7 @@ import * as ipxModule from 'ipx';
 import type { IPXStorage } from 'ipx';
 // @ts-expect-error virtual module injected by the module
 import { ipxRoute } from '#nuxt-filer-image';
-import { useFileStorageProvider } from '../provider';
+import { headStoredFile, useFileStorageProvider } from '../provider';
 
 /**
  * Maps an IPX `id` (the path after the modifiers segment) to a `(groupId, fileId)`
@@ -32,8 +32,8 @@ const filerStorage: IPXStorage = {
     const parsed = parseId(id);
     if (!parsed) return undefined;
     const [groupId, fileId] = parsed;
-    const provider = useFileStorageProvider();
-    const file = await provider.get(groupId, fileId);
+    // Metadata only; IPX reads the bytes through getData() when it renders.
+    const file = await headStoredFile(useFileStorageProvider(), groupId, fileId);
     if (!file) return undefined;
     const mtime = file.updatedAt ?? file.createdAt ?? new Date();
     return {

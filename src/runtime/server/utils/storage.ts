@@ -7,7 +7,7 @@ import type {
   ImageTransformOptions,
   ImageTransformResult,
 } from '../../../runtime/types';
-import { useFileStorageProvider } from '../provider';
+import { headStoredFile, useFileStorageProvider } from '../provider';
 import { transformImage } from './image';
 import { transformWithService, useImageService } from './image-service-runtime';
 
@@ -59,6 +59,15 @@ export const useFileStorage = () => {
     id: string
   ): Promise<StoredFile | null> {
     return await provider.get(groupId, id);
+  }
+
+  /** Like {@link get} but without the bytes, when the provider supports it. */
+  async function head(
+    groupId: string,
+    id: string
+  ): Promise<StoredFile | null> {
+    const file = await headStoredFile(provider, groupId, id);
+    return file && { ...file, data: undefined };
   }
 
   async function getData(
@@ -154,6 +163,7 @@ export const useFileStorage = () => {
     upload,
     list,
     get,
+    head,
     getData,
     getMeta,
     updateMeta,

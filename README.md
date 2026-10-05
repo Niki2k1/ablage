@@ -124,8 +124,9 @@ const res = await transformImage(buffer, { width: 64, format: 'webp' })
 | `upload(groupId, data, options?)` | Store a file, returns its ID. `options.transform` runs the bytes through Sharp first (see above) |
 | `list(groupId)` | List all files in a group |
 | `get(groupId, id)` | Get a file with data and metadata |
+| `head(groupId, id)` | Get a file's metadata and timestamps without reading its bytes |
 | `getData(groupId, id)` | Get raw binary data only |
-| `getMeta(id)` | Get metadata only |
+| `getMeta(id)` | Get metadata only. Searches all groups, which is slow on large stores — prefer `head(groupId, id)` |
 | `updateMeta(id, meta)` | Deep-merge metadata update |
 | `remove(groupId, id)` | Delete a file |
 | `clear(groupId)` | Delete all files in a group |
@@ -480,6 +481,9 @@ export default defineNitroPlugin(() => {
 interface FileStorageProvider {
   create(groupId: string, data: Buffer | Uint8Array, meta?: FileMeta): Promise<{ id: string }>
   get(groupId: string, id: string): Promise<StoredFile | null>
+  // Optional: metadata without the bytes. Used by sendStoredFile and the IPX
+  // route to answer 304s without reading the file; falls back to get().
+  head?(groupId: string, id: string): Promise<StoredFile | null>
   getData(groupId: string, id: string): Promise<Buffer | null>
   getMeta(id: string): Promise<FileMeta | null>
   list(groupId: string): Promise<StoredFile[]>

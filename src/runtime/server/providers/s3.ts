@@ -148,6 +148,13 @@ export function createS3Provider(options: S3ProviderOptions): FileStorageProvide
       return toStoredFile(id, groupId, meta, data ?? undefined);
     },
 
+    async head(groupId, id) {
+      const client = await getClient();
+      const meta = await readMeta(client, metaKey(groupId, id));
+      if (!meta && !(await client.head(dataKey(groupId, id)))) return null;
+      return toStoredFile(id, groupId, meta);
+    },
+
     async getData(groupId, id) {
       return (await getClient()).get(dataKey(groupId, id));
     },

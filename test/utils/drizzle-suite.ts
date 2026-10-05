@@ -92,6 +92,24 @@ export function runDrizzleSuite({ pgCore, drizzle, PGlite, storage }: DrizzleMod
         expect((await provider.getData('studio', id))?.toString()).toBe('hello');
       });
 
+      it('head returns the row without reading the blob', async () => {
+        const { provider, blobs } = setup;
+        const { id } = await provider.create('g', Buffer.from('x'), meta({ name: 'h.png' }));
+        const get = blobs.get;
+        let blobReads = 0;
+        blobs.get = async (key) => {
+          blobReads++;
+          return get(key);
+        };
+
+        const head = await provider.head!('g', id);
+        expect(head).toMatchObject({ id, groupId: 'g', meta: { name: 'h.png' } });
+        expect(head!.data).toBeUndefined();
+        expect(head!.createdAt).toBeInstanceOf(Date);
+        expect(await provider.head!('other', id)).toBeNull();
+        expect(blobReads).toBe(1); // only the row-less 'other' lookup checks the blob store
+      });
+
       it('scopes get/has/remove by group', async () => {
         const { provider } = setup;
         const { id } = await provider.create('a', Buffer.from('x'), meta());

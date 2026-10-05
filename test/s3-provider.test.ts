@@ -65,6 +65,26 @@ describe('createS3Provider (provider logic)', () => {
     expect(await p.has('studio', id)).toBe(true);
   });
 
+  it('head returns metadata without downloading the data object', async () => {
+    const { client } = memoryClient();
+    const p = createS3Provider({ client });
+    const { id } = await p.create('studio', Buffer.from('hello'), meta({ name: 'a.png' }));
+
+    const gets: string[] = [];
+    const get = client.get;
+    client.get = async (key) => {
+      gets.push(key);
+      return get(key);
+    };
+    const head = await p.head!('studio', id);
+
+    expect(head).toMatchObject({ id, groupId: 'studio', meta: { name: 'a.png' } });
+    expect(head!.data).toBeUndefined();
+    expect(head!.createdAt).toBeInstanceOf(Date);
+    expect(gets).toEqual([`studio/meta/${id}`]);
+    expect(await p.head!('studio', 'nope')).toBeNull();
+  });
+
   it('list returns only the group, ignoring other groups and root objects', async () => {
     const { client, store } = memoryClient();
     const p = createS3Provider({ client });
