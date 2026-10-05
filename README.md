@@ -195,6 +195,44 @@ filer: {
 
 `@nuxt/image` and `ipx` are declared as optional peer dependencies — they only need to be installed if you want to use this integration. Both ipx 3 and ipx 4 (pulled in by `@nuxt/image` 2.1+) are supported.
 
+### External image service (imgproxy / standalone IPX)
+
+Image processing can run in a separate service instead of this server, so
+`sharp` and `ipx` aren't needed here and one service can serve many apps:
+
+```ts
+filer: {
+  image: {
+    service: 'imgproxy', // or 'ipx' for a standalone `npx ipx serve`; default 'local'
+  },
+},
+```
+
+```bash
+NUXT_FILER_IMAGE_BASE_URL=https://img.example.com
+NUXT_FILER_IMAGE_KEY=...           # imgproxy signing key + salt (hex); unsigned URLs when unset
+NUXT_FILER_IMAGE_SALT=...
+NUXT_FILER_IMAGE_SOURCE_URL=http://app:3000   # how the service reaches this app
+```
+
+- `<NuxtImg provider="filer">` works unchanged. The image route redirects to a
+  signed service URL, so the signing key never reaches the browser.
+- The service fetches originals from `/_filer-ipx/_/<groupId>/<fileId>`, which
+  serves the stored bytes. `sourceURL` is the origin it uses for that — e.g. the
+  app's address on a private Docker network. Without it, the request's origin
+  is used.
+- Upload-time transforms (`upload(..., { transform })`) go through the service
+  too: the original is staged under the `_filer-transform` group, the variant
+  is fetched, and the staged copy is removed. This requires `sourceURL`.
+  `transformImage()` itself still needs `sharp`.
+- imgproxy receives the IPX modifiers translated to its options (`w`, `h`,
+  `s`, `fit`, `enlarge`, `q`, `f`, `b`, `pos`, `blur`, `sharpen`, `rotate`);
+  modifiers without an equivalent are dropped. A standalone IPX gets them as-is.
+- imgproxy blocks loopback and private source addresses by default. If
+  `sourceURL` points at one, set `IMGPROXY_ALLOW_LOOPBACK_SOURCE_ADDRESSES` /
+  `IMGPROXY_ALLOW_PRIVATE_SOURCE_ADDRESSES`. A standalone IPX needs the source
+  host in `--domains`.
+
 ## Resumable uploads (tus)
 
 Large or flaky-network uploads can use the [tus protocol](https://tus.io)

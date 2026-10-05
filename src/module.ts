@@ -22,6 +22,25 @@ export interface FilerImageOptions {
   route?: string;
   /** Name to register the @nuxt/image provider under. Default: `filer`. */
   providerName?: string;
+  /**
+   * Where images are processed. `'local'` (default) runs IPX/sharp in this
+   * server. `'imgproxy'` or `'ipx'` (a standalone `ipx serve`) offload it: the
+   * image route redirects to the service, and upload-time transforms are
+   * fetched from it — so `sharp`/`ipx` aren't needed here.
+   */
+  service?: 'local' | 'imgproxy' | 'ipx';
+  /** Base URL of the image service. Runtime override: `NUXT_FILER_IMAGE_BASE_URL`. */
+  baseURL?: string;
+  /** imgproxy signing key (hex). Prefer `NUXT_FILER_IMAGE_KEY`. Unsigned URLs when unset. */
+  key?: string;
+  /** imgproxy signing salt (hex). Prefer `NUXT_FILER_IMAGE_SALT`. */
+  salt?: string;
+  /**
+   * Origin the service fetches originals from (e.g. `http://app:3000` on a
+   * private network). Defaults to the request origin; required for
+   * upload-time transforms. Runtime override: `NUXT_FILER_IMAGE_SOURCE_URL`.
+   */
+  sourceURL?: string;
 }
 
 export interface FilerTusOptions {
@@ -198,16 +217,39 @@ export default defineNuxtModule<ModuleOptions>({
       options.image !== false && (imageOpt.enabled ?? true) !== false;
     const ipxRoute = (imageOpt.route ?? '/_filer-ipx').replace(/\/+$/, '');
     const providerName = imageOpt.providerName ?? 'filer';
+    const imageService = imageEnabled ? imageOpt.service ?? 'local' : 'local';
+
+    // Service settings live in private runtime config so URLs and signing
+    // secrets can come from env (NUXT_FILER_IMAGE_*) instead of the build.
+    if (imageService !== 'local') {
+      const runtimeFiler = (nuxt.options.runtimeConfig.filer ?? {}) as Record<string, unknown>;
+      runtimeFiler.image = defu(runtimeFiler.image as object, {
+        baseURL: imageOpt.baseURL ?? '',
+        key: imageOpt.key ?? '',
+        salt: imageOpt.salt ?? '',
+        sourceURL: imageOpt.sourceURL ?? '',
+      });
+      nuxt.options.runtimeConfig.filer = runtimeFiler;
+
+      // The route also serves originals to the service (and upload-time
+      // transforms depend on it), so register it even without @nuxt/image.
+      addServerHandler({
+        route: `${ipxRoute}/**`,
+        handler: resolver.resolve('./runtime/server/handlers/image-service'),
+      });
+    }
 
     const shouldRegisterImage =
       imageEnabled
       && (imageOpt.enabled === 'force' || hasNuxtModule('@nuxt/image'));
 
     if (shouldRegisterImage) {
-      addServerHandler({
-        route: `${ipxRoute}/**`,
-        handler: resolver.resolve('./runtime/server/handlers/ipx'),
-      });
+      if (imageService === 'local') {
+        addServerHandler({
+          route: `${ipxRoute}/**`,
+          handler: resolver.resolve('./runtime/server/handlers/ipx'),
+        });
+      }
 
       // Inject the provider into the user's image config. @nuxt/image
       // snapshots `options.providers` during its own setup, so if it has
@@ -250,7 +292,10 @@ export default defineNuxtModule<ModuleOptions>({
         `export const storagePath = ${JSON.stringify(options.storagePath)};`,
       ].join('\n');
       // Always emit the image virtual; the handler is only wired when enabled.
-      nitroConfig.virtual['#nuxt-filer-image'] = `export const ipxRoute = ${JSON.stringify(ipxRoute)}`;
+      nitroConfig.virtual['#nuxt-filer-image'] = [
+        `export const ipxRoute = ${JSON.stringify(ipxRoute)};`,
+        `export const imageService = ${JSON.stringify(imageService)};`,
+      ].join('\n');
       // Same for the tus virtual, so server imports never dangle.
       nitroConfig.virtual['#nuxt-filer-tus'] = [
         `export const tusRoute = ${JSON.stringify(tusRoute)};`,

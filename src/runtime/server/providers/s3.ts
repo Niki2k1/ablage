@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import type {
   FileStorageProvider,
   FileMeta,
@@ -123,7 +122,7 @@ export function createS3Provider(options: S3ProviderOptions): FileStorageProvide
   return {
     async create(groupId, data, meta) {
       const client = await getClient();
-      const id = randomUUID();
+      const id = globalThis.crypto.randomUUID();
 
       await client.put(dataKey(groupId, id), data, meta?.mime);
 

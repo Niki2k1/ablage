@@ -9,6 +9,7 @@ import type {
 } from '../../../runtime/types';
 import { useFileStorageProvider } from '../provider';
 import { transformImage } from './image';
+import { transformWithService, useImageService } from './image-service-runtime';
 
 export type {
   FileMeta,
@@ -29,10 +30,14 @@ export const useFileStorage = () => {
   ): Promise<string> {
     let payload = data;
 
-    // Optional upload-time image processing (requires the `sharp` peer dep).
-    // The stored bytes and the metadata's mime/dimensions reflect the result.
+    // Optional upload-time image processing, via the configured image service
+    // or locally with the `sharp` peer dep. The stored bytes and the
+    // metadata's mime/dimensions reflect the result.
     if (options.transform) {
-      const result = await transformImage(data, options.transform);
+      const service = useImageService();
+      const result = service
+        ? await transformWithService(service, data, options.transform, options.meta)
+        : await transformImage(data, options.transform);
       payload = result.data;
       if (options.meta) {
         options.meta.mime = result.mime;
