@@ -96,6 +96,14 @@ export default defineNuxtModule<ModuleOptions>({
         from: resolver.resolve('./runtime/server/utils/storage'),
       },
       {
+        name: 'readUploadedFile',
+        from: resolver.resolve('./runtime/server/utils/upload'),
+      },
+      {
+        name: 'readUploadedFiles',
+        from: resolver.resolve('./runtime/server/utils/upload'),
+      },
+      {
         name: 'transformImage',
         from: resolver.resolve('./runtime/server/utils/image'),
       },
