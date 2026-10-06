@@ -4,6 +4,7 @@ import type { Storage } from 'unstorage'
 import {
   createDrizzleProvider,
   importUnstorageMetadata,
+  migrateDrizzleMetadata,
   type BlobStore,
 } from '../../src/runtime/server/providers/drizzle'
 import { setFileStorageProvider } from '../../src/runtime/server/provider'
@@ -107,6 +108,30 @@ export function runDrizzleSuite({ pgCore, drizzle, PGlite, storage }: DrizzleMod
       await ctx.client.exec('drop table ablage_files')
       await expect(ctx.storage.put('g', new Uint8Array(1))).rejects.toThrow()
       expect(ctx.store.size).toBe(0)
+    })
+
+    it('migrates rows written by the 0.0.x provider', async () => {
+      // 0.0.x stored the flat FileMeta in the metadata column and timestamps in their columns.
+      const created = new Date('2026-01-01T00:00:00.000Z')
+      await ctx.client.query(
+        'insert into ablage_files (id, group_id, metadata, created_at, updated_at) values ($1, $2, $3, $4, $4), ($5, $2, $6, $4, $4)',
+        ['f1', 'org:5', JSON.stringify({ name: 'a.pdf', mime: 'application/pdf', type: 'doc', version: 1 }), created, 'gone', JSON.stringify({ name: 'x' })],
+      )
+      await ctx.blobs.put('org:5/data/f1', new TextEncoder().encode('pdf!'))
+
+      const options = { db: ctx.db, table: makeTable('jsonb'), blobs: ctx.blobs }
+      expect(await migrateDrizzleMetadata(options)).toEqual({ migrated: 1, skipped: 0, orphaned: ['org:5/gone'] })
+      expect(await migrateDrizzleMetadata(options)).toEqual({ migrated: 0, skipped: 1, orphaned: ['org:5/gone'] })
+
+      expect(await ctx.storage.head({ group: 'org:5', id: 'f1' })).toMatchObject({
+        size: 4,
+        name: 'a.pdf',
+        contentType: 'application/pdf',
+        uploadedAt: created,
+        updatedAt: created,
+        customMetadata: { type: 'doc', version: 1 },
+      })
+      expect(await ctx.storage.head({ group: 'org:5', id: 'gone' })).toBeNull()
     })
 
     it('rejects a table missing a required column', async () => {

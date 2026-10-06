@@ -5,8 +5,8 @@ import {
   deserializeObject,
   rangeStream,
   serializeObject,
-  type SerializedFileObject,
 } from '../utils/objects';
+import { isCurrentMetadata, legacyToObject, parseStoredMetadata, type MigrationResult } from '../utils/legacy';
 
 /**
  * Built-in provider on a Nitro storage mount: bytes at `<group>:data:<id>`,
@@ -20,8 +20,9 @@ export function createUnstorageProvider(storageName: string): FileStorageProvide
   const metaPrefix = (group: string) => `${group.replace(/\//g, ':')}:meta:`;
 
   const readObject = async (key: string): Promise<FileObject | null> => {
-    const raw = await storage().getItem<SerializedFileObject>(key);
-    return raw && typeof raw === 'object' ? deserializeObject(raw) : null;
+    const raw = await storage().getItem(key);
+    // 0.0.x sidecars are ignored until migrateUnstorageMetadata() converts them.
+    return isCurrentMetadata(raw) ? deserializeObject(raw) : null;
   };
 
   return {
@@ -80,4 +81,43 @@ export function createUnstorageProvider(storageName: string): FileStorageProvide
       return null;
     },
   };
+}
+
+/**
+ * Upgrade a storage mount written by nuxt-filer 0.0.x's unstorage provider,
+ * in place: every `<group>:meta:<id>` sidecar in the old format is rewritten
+ * as a FileObject (`size` and `etag` computed from the bytes), and files
+ * stored without a sidecar get one. Bytes are not touched. Safe to re-run.
+ */
+export async function migrateUnstorageMetadata(options: { from: string }): Promise<MigrationResult> {
+  const storage = useStorage(options.from);
+  const keys = await storage.getKeys();
+  const result: MigrationResult = { migrated: 0, skipped: 0, orphaned: [] };
+
+  const split = (key: string, kind: 'data' | 'meta') => {
+    const at = key.lastIndexOf(`:${kind}:`);
+    return at > 0 ? { group: key.slice(0, at), id: key.slice(at + kind.length + 2) } : null;
+  };
+  const dataKeys = new Set(keys.filter((key) => split(key, 'data')));
+
+  for (const key of keys) {
+    const meta = split(key, 'meta');
+    if (meta && !dataKeys.has(`${meta.group}:data:${meta.id}`)) result.orphaned.push(key);
+  }
+
+  for (const dataKey of dataKeys) {
+    const ref = split(dataKey, 'data')!;
+    const metaKey = `${ref.group}:meta:${ref.id}`;
+    const parsed = parseStoredMetadata(await storage.getItem(metaKey));
+    if (parsed?.current) {
+      result.skipped++;
+      continue;
+    }
+    const data = await storage.getItemRaw<Uint8Array>(dataKey);
+    if (!data) continue;
+    const object = await legacyToObject(ref, parsed?.legacy, new Uint8Array(data));
+    await storage.setItem(metaKey, serializeObject(object));
+    result.migrated++;
+  }
+  return result;
 }

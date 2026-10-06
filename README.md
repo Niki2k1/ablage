@@ -5,326 +5,333 @@
 [![License][license-src]][license-href]
 [![Nuxt][nuxt-src]][nuxt-href]
 
-> **ablage** is the new name of [`nuxt-filer`](https://www.npmjs.com/package/nuxt-filer), starting with v0.1.0. v0.1.0 also changes the API (see [#21](https://github.com/Niki2k1/ablage/issues/21)); a migration guide follows with the release.
+File storage for Nuxt. Store, read, serve and transform files from your server
+routes, on the local filesystem, S3/R2 or a Drizzle-managed database — with one
+API.
 
-File storage module for Nuxt (≥ 4.6, Node ≥ 22). Provides a server-side `useFileStorage()` composable with pluggable storage backends — from zero-config local filesystem to custom providers with separate metadata databases and external file sync.
+> **ablage** (German for "filing tray") is the new name of
+> [`nuxt-filer`](https://www.npmjs.com/package/nuxt-filer). Upgrading from
+> nuxt-filer 0.0.x? See the [migration guide](./MIGRATION.md).
+
+Requires Nuxt ≥ 4.6 and Node ≥ 22.
 
 ## Features
 
-- **Pluggable provider architecture** — built-in unstorage (default), S3 and Drizzle providers, or bring your own
-- **File versioning** — built-in version tracking, latest-version filtering, and duplicate detection
-- **External file sync** — two-way sync with external systems (Jira, SharePoint, etc.) via optional provider interface
-- **Zero-config default** — works out of the box with local filesystem storage, no database required
-- **Auto-imported** — `useFileStorage()`, types, and provider utilities are auto-imported in server context
-- **Group-based organization** — files are organized by `groupId` (project, ticket, order, etc.)
-- **`@nuxt/image` integration** — when `@nuxt/image` is installed, an IPX endpoint is wired up automatically so `<NuxtImg provider="ablage" src="<groupId>/<id>" />` returns optimized variants of stored files
-- **Upload-time image processing** — optionally run images through Sharp when storing them (resize, format-convert, optimize, preserve animation) via a per-call `transform` option or the standalone `transformImage()` util
-- **Resumable uploads (tus)** — opt-in [tus](https://tus.io) endpoint backed by `@tus/server`, a client-side `useTusUpload()` composable, and `useTusStaging().promote()` to move finished uploads into the file storage
+- **One storage API** — `useFileStorage()`: `put`, `head`, `get` (streamed, with byte ranges), `list` (paginated), `updateMeta`, `remove`
+- **Providers** — local filesystem (default), S3 / Cloudflare R2 / MinIO, Drizzle (metadata in your database, bytes in a blob store), or your own
+- **Serving** — `sendStoredFile()` streams files with `etag`/`last-modified` revalidation, `Range` requests and HEAD; `signedUrl()` creates expiring links without a route of your own
+- **Images** — `@nuxt/image` provider with on-request transforms (IPX, or an external imgproxy / IPX service), upload-time transforms, and image + PDF thumbnails
+- **Uploads** — `readUploadedFile()` validation helper, and resumable [tus](https://tus.io) uploads
+- **Portable** — server routes run on `nuxt/server`, ready for Nuxt 5
 
-## Quick Setup
+## Setup
 
 ```bash
 npx nuxi module add ablage
 ```
 
-## Configuration
-
 ```ts
 // nuxt.config.ts
 export default defineNuxtConfig({
   modules: ['ablage'],
   ablage: {
-    // Nitro storage mount name (default: 'documents'). Mounted on the local fs
-    // for every provider unless you configure it yourself under `nitro.storage`.
+    // Nitro storage mount for file bytes (default: 'documents'), mounted on
+    // the local filesystem unless you configure it yourself in `nitro.storage`.
     storageName: 'documents',
-    // Base path for fs-lite driver (default: '.data/documents')
     storagePath: '.data/documents',
-    // 'unstorage' (built-in) or 'custom' (bring your own provider)
+    // 'unstorage' (default, uses the mount above) or 'custom' (register a
+    // provider yourself, see "Providers").
     provider: 'unstorage',
   },
 })
 ```
 
+With the defaults, files are stored under `.data/documents` and nothing else is
+needed.
+
 ## Usage
 
-### Basic — Upload and retrieve files
+Everything below is auto-imported in server code.
+
+### Storing and reading files
+
+Files belong to a **group** (e.g. `avatars`, `project:42`) and have an **id** —
+generated, or chosen by you. Together they form a `FileRef`: `{ group, id }`.
 
 ```ts
-// server/api/files/[groupId].post.ts
+// server/api/avatars.post.ts
 export default defineEventHandler(async (event) => {
-  const groupId = getRouterParam(event, 'groupId')!
-  const body = await readMultipartFormData(event)
-  const file = body![0]!
-
+  const upload = await readUploadedFile(event, { types: ['image'], maxSize: '5MB' })
   const storage = useFileStorage()
 
-  const id = await storage.upload(groupId, file.data, {
-    meta: {
-      name: file.filename || 'unnamed',
-      mime: file.type || 'application/octet-stream',
-      type: 'document',
-      version: 1,
-    },
+  const file = await storage.put('avatars', upload.data, {
+    contentType: upload.type,
+    name: upload.name,
+    customMetadata: { userId: '42' },
   })
 
-  return { id, groupId }
+  return file // FileObject: group, id, size, contentType, etag, uploadedAt, …
 })
 ```
 
 ```ts
-// server/api/files/[groupId].get.ts
-export default defineEventHandler(async (event) => {
-  const groupId = getRouterParam(event, 'groupId')!
-  const storage = useFileStorage()
+const storage = useFileStorage()
 
-  return await storage.list(groupId)
-})
+await storage.head({ group: 'avatars', id })       // FileObject | null — never reads the bytes
+const file = await storage.get({ group: 'avatars', id })
+if (file) {
+  file.body                                        // ReadableStream<Uint8Array>
+  await file.bytes()                               // or the whole file as Uint8Array
+}
+await storage.get(ref, { range: { offset: 0, length: 1024 } }) // a byte range
 ```
 
-### Upload-time image processing
-
-Pass a `transform` option to `upload()` to process an image **before it is stored** — useful for normalizing user uploads or rehosted remote images to a capped size and compact format. The processed bytes are what gets stored, and the file's `meta.mime` / `meta.width` / `meta.height` are updated to match the result.
-
-```ts
-const id = await storage.upload(groupId, file.data, {
-  meta: { name: file.filename!, mime: file.type!, type: 'image', version: 1 },
-  transform: {
-    width: 128,
-    height: 128,
-    format: 'webp', // convert to webp
-    // fit: 'inside' (default), withoutEnlargement: true (default),
-    // quality, background, animated (default true)
-  },
-})
-```
-
-You can also call the util directly (e.g. for images fetched server-side):
-
-```ts
-const res = await transformImage(buffer, { width: 64, format: 'webp' })
-// res: { data: Buffer, mime: 'image/webp', format: 'webp', width: 64, height: 64 }
-```
-
-**`transform` / `transformImage()` options**
+`put()` options:
 
 | Option | Description |
 |---|---|
-| `width`, `height` | Target box in px (combined with `fit`) |
-| `fit` | Resize fit mode (`inside` default, or `cover`/`contain`/`fill`/`outside`) |
-| `withoutEnlargement` | Never scale up beyond the original (default `true`) |
-| `format` | Output format: `webp` / `png` / `jpeg` / `avif` / `gif` (default: keep input) |
-| `quality` | Output quality `1-100` for lossy formats |
-| `animated` | Preserve all frames of animated inputs (default `true`; only retained when `format` is `webp`/`gif`) |
-| `background` | Background used when flattening transparency |
+| `id` | Store at this id instead of a generated UUID (letters, digits, `.`, `_`, `-`) |
+| `overwrite` | Replace an existing file at `id`; without it, `put()` throws a 409 |
+| `ifMatch` | Replace only if the stored `etag` matches; otherwise a 412 |
+| `contentType`, `name`, `cacheControl` | Stored with the file and used when serving it |
+| `customMetadata` | Your own JSON-serializable fields |
+| `transform` | Process an image first (see [Images](#images)) |
 
-> Image processing requires the optional [`sharp`](https://sharp.pixelplumbing.com/) peer dependency. Install it (`npm i sharp`) only if you use `transform` / `transformImage()` — calling them without `sharp` throws a clear error. Without a `transform`, `upload()` stores the raw bytes unchanged and needs no extra dependency.
+Bodies can be a `Uint8Array`/`Buffer`, `ArrayBuffer`, `Blob` or `ReadableStream`.
+`put()` reads the body into memory to compute the size and `etag`; use
+[tus](#resumable-uploads-tus) for very large uploads.
 
-### Thumbnails and PDF previews with `generateThumbnail()`
+### Metadata
 
-Builds a preview image from a stored file: images are resized with Sharp, PDFs
-get a page (the first by default) rendered and then resized. It returns
-`null` instead of throwing for unsupported types, unreadable input, or missing
-optional dependencies, so it can run on every upload:
+Every file has system fields and your `customMetadata`:
 
 ```ts
-const file = await readUploadedFile(event)
-const id = await storage.upload('docs', file.data, { meta: { name: file.name, mime: file.type, type: 'document', version: 1 } })
-
-const thumb = await generateThumbnail(file.data, file.type, { width: 300, height: 200 })
-if (thumb) {
-  await storage.upload('docs', thumb.data, {
-    meta: { name: `thumb_${file.name}`, mime: thumb.mime, type: 'thumbnail', version: 1 },
-  })
+interface FileObject<M = Record<string, unknown>> {
+  group: string
+  id: string
+  size: number          // bytes
+  contentType: string   // default 'application/octet-stream'
+  etag: string          // SHA-256 of the bytes, base64url
+  uploadedAt: Date      // when these bytes were written
+  updatedAt: Date       // last change to bytes or metadata
+  name?: string
+  cacheControl?: string
+  width?: number        // images, when known
+  height?: number
+  customMetadata: M
 }
 ```
 
-- Options are those of `transformImage()` plus `page` (PDF page, default `1`).
-  Defaults: a 300×300 `inside` box, `webp`, and the first frame only for
-  animated images (`animated: true` keeps animation).
-- Requires `sharp`; PDFs additionally need [`unpdf`](https://github.com/unjs/unpdf)
-  and `@napi-rs/canvas` (`npm i unpdf @napi-rs/canvas`). All are optional peer
-  dependencies; when one is missing, a warning is logged once and `null` returned.
-- On-request transforms (the IPX route, or imgproxy) can't render PDFs, so a
-  stored preview like this is the way to show one.
-
-### `useFileStorage()` API
-
-| Method | Description |
-|---|---|
-| `upload(groupId, data, options?)` | Store a file, returns its ID. `options.transform` runs the bytes through Sharp first (see above) |
-| `list(groupId)` | List all files in a group |
-| `get(groupId, id)` | Get a file with data and metadata |
-| `head(groupId, id)` | Get a file's metadata and timestamps without reading its bytes |
-| `getData(groupId, id)` | Get raw binary data only |
-| `getMeta(id)` | Get metadata only. Searches all groups, which is slow on large stores — prefer `head(groupId, id)` |
-| `updateMeta(id, meta)` | Deep-merge metadata update |
-| `remove(groupId, id)` | Delete a file |
-| `clear(groupId)` | Delete all files in a group |
-| `has(groupId, id)` | Check if a file exists |
-| `findByMeta(key, value, groupId?)` | Find a file by metadata field |
-| `checkDuplicate(groupId, key, value)` | Check if a duplicate exists |
-| `getLatestVersions(groupId)` | Get latest version of each file by name |
-| `getNextVersionNumber(files, name)` | Calculate next version number |
-| `external?.sync(groupId, id)` | Sync with external system (if provider supports it) |
-| `external?.push(groupId, id, data, meta)` | Push to external system |
-| `external?.pull(groupId, ref)` | Pull from external system |
-
-### Validating uploads with `readUploadedFile()`
-
-Reads a file from a `multipart/form-data` request and validates it, throwing a
-400 (no file), 413 (too large) or 415 (type not allowed) with a message naming
-the file and the limit:
-
 ```ts
-// server/api/models.post.ts
-export default defineEventHandler(async (event) => {
-  const file = await readUploadedFile(event, {
-    types: ['image', '.stl', '.3mf', 'application/pdf'],
-    maxSize: '50MB',
-  })
-  const id = await useFileStorage().upload(file.fields.group ?? 'uploads', file.data, {
-    meta: { name: file.name, mime: file.type, type: 'model', version: 1 },
-  })
-  return { id }
-})
+// Shallow-merges customMetadata; other fields are replaced. Throws 404 if missing.
+await storage.updateMeta(ref, { name: 'portrait.png', customMetadata: { alt: 'Me' } })
+
+// Typed custom metadata:
+const file = await storage.head<{ userId: string }>(ref)
 ```
 
-- `types` uses the syntax of the HTML `accept` attribute: exact MIME types
-  (`'image/png'`), families (`'image'` or `'image/*'`) and extensions
-  (`'.stl'`). Extensions help for formats browsers send without a MIME type.
-- `maxSize` takes bytes or a string like `'500KB'`, `'2MB'` (1024-based). An
-  oversized request is rejected from its `Content-Length` before the body is read.
-- `field` picks the form field (default `'file'`); the result's `fields` holds
-  the other, non-file form fields.
-- `readUploadedFiles(event, { ..., max })` reads several files from the same field.
-
-### Serving raw files with `sendStoredFile()`
-
-The IPX route serves **images** with full HTTP caching. For everything else — original PDFs, non-image downloads, the unprocessed bytes of any file — `sendStoredFile()` streams a stored file back through an H3 event with the same revalidation story.
+### Listing, finding and removing
 
 ```ts
-// server/api/files/[groupId]/[id].get.ts
+const page = await storage.list('avatars', { limit: 50 })        // ordered by id
+const next = await storage.list('avatars', { limit: 50, cursor: page.cursor })
+await storage.list('docs', { prefix: 'invoice-' })                 // ids starting with…
+
+for await (const file of storage.listAll('avatars')) { /* every file, page by page */ }
+
+await storage.findByMeta('userId', '42', 'avatars') // first match; provider support required
+
+await storage.remove(ref)                           // or an array of refs
+await storage.clear('tmp')                          // a whole group
+```
+
+### Serving files
+
+`sendStoredFile()` streams a file with `content-type`, `content-length`,
+`content-disposition`, `cache-control`, `etag` and `last-modified`. It answers
+`if-none-match` / `if-modified-since` with 304 and HEAD requests without reading
+the bytes, and serves `Range` requests (206 / 416).
+
+```ts
+// server/api/files/[group]/[id].ts
 export default defineEventHandler((event) => {
-  const { groupId, id } = getRouterParams(event)
-  return sendStoredFile(event, groupId, id) // 404 if missing
+  const { group, id } = getRouterParams(event)
+  // check access here
+  return sendStoredFile(event, { group, id }, { disposition: 'inline' })
 })
 ```
 
-It sets `content-type` from `meta.mime`, a `content-disposition` filename from `meta.name`, and `cache-control` / `last-modified` / `etag`, honoring `if-modified-since` / `if-none-match` (`304`) — just like the IPX route. `HEAD` requests get the headers without a body.
+Options: `disposition` (`'inline'` | `'attachment'`), `filename`, `maxAge` (seconds,
+default: the file's `cacheControl`, else one year) and `cacheControl`.
+
+> Name the route file without a method suffix (`[id].ts`, not `[id].get.ts`):
+> Nitro routes `.get.ts` files for GET only, so HEAD requests would not reach it.
+
+`createFileResponse(request, ref, options)` is the framework-free core: it takes
+a `Request` (or `{ method, headers }`) and returns a `Response`.
+
+### Expiring links
+
+`signedUrl()` creates a time-limited link served by the module itself — no route
+of your own:
 
 ```ts
-sendStoredFile(event, groupId, id, {
-  disposition: 'attachment', // force a download ('inline' is the default)
-  filename: 'invoice-2026.pdf', // override the download name (default: meta.name)
-  maxAge: 3600, // cache-control max-age in seconds (default: 1 year; 0 = no-cache)
+const link = await storage.signedUrl({ group: 'invoices', id }, {
+  expiresIn: 600,   // seconds, default 3600
+  download: true,   // serve as an attachment
+})
+// → /_ablage/file/invoices/<id>?expires=…&sig=…
+```
+
+Links are signed with HMAC-SHA256 using a key derived from Nuxt's `appSecret`,
+so set `NUXT_APP_SECRET` (at least 32 characters). Tampered or expired links get
+a 403; valid ones are cached privately until they expire.
+
+### Validating uploads
+
+`readUploadedFile()` reads a file from a `multipart/form-data` request and
+validates it, throwing 400 (no file), 413 (too large) or 415 (type not allowed):
+
+```ts
+const file = await readUploadedFile(event, {
+  types: ['image', '.stl', 'application/pdf'], // MIME types, families, extensions
+  maxSize: '50MB',                               // bytes or '500KB' / '2MB' / '1GB'
+  field: 'file',                                 // form field, default 'file'
+})
+// → { data, name, type, size, fields } — `fields` holds the other form fields
+```
+
+`readUploadedFiles(event, { …, max })` reads several files from one field.
+Oversized requests are rejected from `Content-Length` before the body is read.
+
+## Images
+
+### Upload-time transforms
+
+Resize, convert or optimize images while storing them. The stored
+`contentType`, `width` and `height` reflect the result:
+
+```ts
+await storage.put('avatars', data, {
+  contentType: 'image/png',
+  transform: { width: 512, height: 512, fit: 'cover', format: 'webp', quality: 80 },
 })
 ```
 
-`sendStoredFile` is auto-imported in your server routes — no need to import it.
+Options: `width`, `height`, `fit` (`cover` | `contain` | `fill` | `inside` |
+`outside`, default `inside`), `withoutEnlargement` (default `true`), `format`
+(`webp` | `png` | `jpeg` | `avif` | `gif`), `quality`, `animated` (keep all frames,
+default `true`) and `background`. Runs locally with the optional `sharp` peer
+dependency, or through an [external image service](#external-image-service).
+`transformImage(data, options)` is available standalone.
 
-## `@nuxt/image` Integration
+### Thumbnails and PDF previews
 
-If `@nuxt/image` is installed alongside `ablage`, the module automatically registers an `ablage` image provider and an IPX endpoint that pulls bytes from your storage provider, runs them through Sharp, and returns the result.
+```ts
+const thumb = await generateThumbnail(file.data, file.type, { width: 300, height: 200 })
+if (thumb) {
+  await storage.put('docs', thumb.data, { contentType: thumb.mime, name: `thumb_${file.name}` })
+}
+```
+
+Images are resized with sharp; PDFs get a page (default: the first) rendered with
+[`unpdf`](https://github.com/unjs/unpdf) and `@napi-rs/canvas`. It returns `null`
+instead of throwing for unsupported types, unreadable input or missing optional
+dependencies. Defaults: a 300×300 `inside` box, `webp`, the first frame of
+animated images.
+
+### `@nuxt/image` integration
+
+With `@nuxt/image` installed, the module registers an `ablage` image provider and
+an image route that transforms stored images on request:
 
 ```vue
-<template>
-  <NuxtImg
-    provider="ablage"
-    :src="`${groupId}/${fileId}`"
-    width="200"
-    height="200"
-    fit="cover"
-    format="webp"
-  />
-</template>
+<NuxtImg provider="ablage" :src="`${file.group}/${file.id}`" width="200" height="200" fit="cover" format="webp" />
 ```
 
-Generated URLs look like `/_ablage/image/w_200,h_200,fit_cover,format_webp/<groupId>/<fileId>` and are served with `cache-control: max-age=...`, `last-modified`, and `etag` for `if-modified-since` / `if-none-match` revalidation.
+URLs look like `/_ablage/image/w_200,h_200,fit_cover,f_webp/<group>/<id>` and are
+cached with `etag` / `last-modified` revalidation. Build them on the server with
+`storage.url(ref, { transform })`:
 
-The integration can be configured or turned off:
+```ts
+storage.url(ref)                                            // the original
+storage.url(ref, { transform: { width: 300, format: 'webp' } })
+storage.url(ref, { transform: { s: '300x200', q: '80' } })  // or IPX modifiers
+```
+
+> The image route is public, like any `<NuxtImg>` source. Use `signedUrl()` for
+> private files.
 
 ```ts
 ablage: {
   image: {
-    enabled: true,            // false to disable; 'force' to register without @nuxt/image
-    route: '/_ablage/image',     // base path for the IPX endpoint
-    providerName: 'ablage',    // name used in <NuxtImg provider="..." />
+    enabled: true,           // false to disable; 'force' to register without @nuxt/image
+    route: '/_ablage/image', // default
+    providerName: 'ablage',  // <NuxtImg provider="…">
   },
 },
 ```
 
-`@nuxt/image` and `ipx` are declared as optional peer dependencies — they only need to be installed if you want to use this integration. Both ipx 3 and ipx 4 (pulled in by `@nuxt/image` 2.1+) are supported.
+`@nuxt/image`, `ipx` and `sharp` are optional peer dependencies. ipx 3 and 4 are
+supported.
 
-### External image service (imgproxy / standalone IPX)
+### External image service
 
-Image processing can run in a separate service instead of this server, so
-`sharp` and `ipx` aren't needed here and one service can serve many apps:
+Image processing can run in a separate service (imgproxy or a standalone
+`ipx serve`) instead of this server, so `sharp` and `ipx` aren't needed here:
 
 ```ts
 ablage: {
-  image: {
-    service: 'imgproxy', // or 'ipx' for a standalone `npx ipx serve`; default 'local'
-  },
+  image: { service: 'imgproxy' }, // or 'ipx'; default 'local'
 },
 ```
 
 ```bash
 NUXT_ABLAGE_IMAGE_BASE_URL=https://img.example.com
-NUXT_ABLAGE_IMAGE_KEY=...           # imgproxy signing key + salt (hex); unsigned URLs when unset
+NUXT_ABLAGE_IMAGE_KEY=...                     # imgproxy signing key + salt (hex); unsigned when unset
 NUXT_ABLAGE_IMAGE_SALT=...
-NUXT_ABLAGE_IMAGE_SOURCE_URL=http://app:3000   # how the service reaches this app
+NUXT_ABLAGE_IMAGE_SOURCE_URL=http://app:3000  # how the service reaches this app
 ```
 
-- `<NuxtImg provider="ablage">` works unchanged. The image route redirects to a
-  signed service URL, so the signing key never reaches the browser.
-- The service fetches originals from `/_ablage/image/_/<groupId>/<fileId>`, which
-  serves the stored bytes. `sourceURL` is the origin it uses for that — e.g. the
-  app's address on a private Docker network. Without it, the request's origin
-  is used.
-- Upload-time transforms (`upload(..., { transform })`) go through the service
-  too: the original is staged under the `_ablage-transform` group, the variant
-  is fetched, and the staged copy is removed. This requires `sourceURL`.
-  `transformImage()` itself still needs `sharp`.
-- imgproxy receives the IPX modifiers translated to its options (`w`, `h`,
-  `s`, `fit`, `enlarge`, `q`, `f`, `b`, `pos`, `blur`, `sharpen`, `rotate`);
-  modifiers without an equivalent are dropped. A standalone IPX gets them as-is.
-- imgproxy blocks loopback and private source addresses by default. If
-  `sourceURL` points at one, set `IMGPROXY_ALLOW_LOOPBACK_SOURCE_ADDRESSES` /
-  `IMGPROXY_ALLOW_PRIVATE_SOURCE_ADDRESSES`. A standalone IPX needs the source
-  host in `--domains`.
+- `<NuxtImg provider="ablage">` works unchanged: the image route redirects to a
+  signed service URL, so the key never reaches the browser.
+- The service fetches originals from `/_ablage/image/_/<group>/<id>`; `sourceURL`
+  is the origin it uses (e.g. the app on a private Docker network). Without it,
+  the request's origin is used.
+- Upload-time transforms go through the service too (the original is staged under
+  the `_ablage-transform` group and removed afterwards); they require `sourceURL`.
+- IPX modifiers are translated to imgproxy options (`w`, `h`, `s`, `fit`,
+  `enlarge`, `q`, `f`, `b`, `pos`, `blur`, `sharpen`, `rotate`); others are dropped.
+- imgproxy blocks loopback and private source addresses by default; set
+  `IMGPROXY_ALLOW_LOOPBACK_SOURCE_ADDRESSES` / `IMGPROXY_ALLOW_PRIVATE_SOURCE_ADDRESSES`
+  if `sourceURL` points at one. A standalone IPX needs the host in `--domains`.
 
 ## Resumable uploads (tus)
 
-Large or flaky-network uploads can use the [tus protocol](https://tus.io)
-instead of a single multipart POST. Uploads are staged chunk-by-chunk into a
-local directory (survives connection drops and page reloads), then *promoted*
-into the regular file storage by one of your own server routes — which is
-where you enforce auth and attach domain metadata.
+Large or flaky-network uploads can use the [tus protocol](https://tus.io).
+Uploads are staged chunk by chunk in a local directory, then *promoted* into the
+file storage by one of your own routes, where you check access.
 
 ```ts
-// nuxt.config.ts
-export default defineNuxtConfig({
-  modules: ['ablage'],
-  ablage: {
-    tus: {
-      enabled: true,
-      route: '/_ablage/tus',            // default
-      stagingDir: '.data/tus',         // default
-      maxSize: 500 * 1024 * 1024,      // optional, bytes
-      expiration: 24 * 60 * 60 * 1000, // optional: purge stale staged uploads
-    },
+ablage: {
+  tus: {
+    enabled: true,
+    route: '/_ablage/tus',            // default
+    stagingDir: '.data/tus',          // default
+    maxSize: 500 * 1024 * 1024,       // optional, bytes
+    expiration: 24 * 60 * 60 * 1000,  // optional: purge stale staged uploads
   },
-})
+},
 ```
 
-Client side, the auto-imported `useTusUpload()` composable wraps
-[`tus-js-client`](https://github.com/tus/tus-js-client) with reactive state:
+Client side, `useTusUpload()` wraps [`tus-js-client`](https://github.com/tus/tus-js-client)
+with reactive state:
 
 ```vue
 <script setup lang="ts">
 const tus = useTusUpload({
-  metadata: (file) => ({ comment: 'from the web app' }), // extra tus metadata
-  // cleanupOnPageHide: true,  // sendBeacon-delete staged uploads on close
+  metadata: file => ({ comment: 'from the web app' }),
+  // cleanupOnPageHide: true, // sendBeacon-delete staged uploads on close
 })
 
 function onSelect(e: Event) {
@@ -333,41 +340,34 @@ function onSelect(e: Event) {
 
 async function save() {
   for (const item of tus.completed.value) {
-    await $fetch('/api/documents/finalize', {
-      method: 'POST',
-      body: { tusId: item.tusId, name: item.file.name },
-    })
+    await $fetch('/api/documents/finalize', { method: 'POST', body: { tusId: item.tusId } })
   }
   tus.clear()
 }
 </script>
 ```
 
-Each entry in `tus.items` tracks `progress`, `complete`, `tusId`, and `error`;
+Each entry in `tus.items` tracks `progress`, `complete`, `tusId` and `error`;
 `tus.remove(name)` aborts and deletes a staged upload, `tus.cancel()` discards
-everything. Interrupted uploads resume automatically (retry backoff, restart
-on `online`, and — via the tus fingerprint — across page reloads).
+everything. Interrupted uploads resume automatically.
 
-Server side, promote a finished upload into the file storage:
+Server side, promote a finished upload. `name` and `contentType` default to the
+upload's tus `filename` / `filetype`; the other `put()` options apply:
 
 ```ts
 // server/api/documents/finalize.post.ts
 export default defineEventHandler(async (event) => {
-  const body = await readBody(event)
-
-  const { id, meta } = await useTusStaging().promote(body.tusId, 'my-group', {
-    meta: { type: 'document' },        // merged over tus filename/filetype
-    // transform: { width: 1600 },     // optional sharp processing
+  const { tusId } = await readBody(event)
+  return useTusStaging().promote(tusId, 'documents', {
+    customMetadata: { kind: 'report' },
+    // transform: { width: 1600 },
   })
-
-  return { id, meta }
 })
 ```
 
-`useTusStaging()` also exposes `info()`, `read()`, and `remove()` for staged
-uploads. To protect or customize the endpoint itself (auth, upload hooks, a
-different datastore), configure the underlying `@tus/server` from a Nitro
-plugin — the server is created lazily on the first request:
+`useTusStaging()` also has `info()`, `read()` and `remove()`. To protect or
+customize the endpoint (auth, hooks, another datastore), configure `@tus/server`
+from a Nitro plugin; the server is created on the first request:
 
 ```ts
 // server/plugins/tus.ts
@@ -380,211 +380,115 @@ export default defineNitroPlugin(() => {
 })
 ```
 
-Notes:
+A `POST <route>/cleanup` sub-route accepts `{ tusIds: string[] }` from
+`navigator.sendBeacon` (used by `cleanupOnPageHide`). Staging uses the local
+filesystem, independent of the storage provider.
 
-- The endpoint handles the full tus lifecycle (create/HEAD/PATCH/DELETE); a
-  `POST <route>/cleanup` sub-route accepts `{ tusIds: string[] }` from
-  `navigator.sendBeacon` for page-close cleanup (used by `cleanupOnPageHide`).
-- Staging uses `@tus/file-store` on the local filesystem, independent of the
-  configured storage provider — promotion works with any provider, including
-  S3 and custom ones.
+## Providers
 
-## S3 storage
+A provider persists bytes and metadata. The default `unstorage` provider uses the
+`storageName` mount. For other backends, set `provider: 'custom'` and register one
+in a Nitro plugin.
 
-For durable object storage (AWS S3, Cloudflare R2, MinIO, …) use the built-in
-`createS3Provider`. It stores each file as a data object plus a JSON metadata
-sidecar, and — unlike unstorage's generic `s3` driver — `list()`/`findByMeta()`
-use real S3 prefix listing with continuation pagination, so a group stays
-correctly scoped even inside a large or shared bucket.
+### S3 / Cloudflare R2 / MinIO
 
 ```ts
-// nuxt.config.ts
-export default defineNuxtConfig({
-  modules: ['ablage'],
-  ablage: { provider: 'custom' },
-})
-```
+// nuxt.config.ts: ablage: { provider: 'custom' }
 
-```ts
-// server/plugins/file-provider.ts
+// server/plugins/storage.ts
 export default defineNitroPlugin(() => {
   const { s3 } = useRuntimeConfig()
   setFileStorageProvider(createS3Provider({
     accessKeyId: s3.accessKeyId,
     secretAccessKey: s3.secretAccessKey,
-    endpoint: s3.endpoint,   // e.g. https://<acct>.r2.cloudflarestorage.com
-    region: s3.region,       // R2: 'auto'
+    endpoint: s3.endpoint,   // e.g. https://<account>.r2.cloudflarestorage.com
+    region: s3.region,       // R2: 'auto' (default)
     bucket: s3.bucket,
-    // prefix: 'media/',      // optional: namespace within a shared bucket
+    // prefix: 'media/',     // namespace within a shared bucket
   }))
 })
 ```
 
-> `createS3Provider` requires the optional [`aws4fetch`](https://github.com/mhart/aws4fetch) peer dependency (`npm i aws4fetch`). Pass a custom `client` to use a different transport or to unit-test without network.
+Each file is a data object plus a JSON metadata object
+(`<group>/data/<id>`, `<group>/meta/<id>`). `head()` reads only the metadata,
+ranged reads use S3 `Range` requests, and `list()` pages with S3 prefix listing.
+Requires the optional [`aws4fetch`](https://github.com/mhart/aws4fetch) peer
+dependency. `createS3Client(options)` gives you the same client on its own (e.g.
+as a Drizzle blob store).
 
-## Drizzle (metadata in your database)
+### Drizzle (metadata in your database)
 
-`createDrizzleProvider` keeps file metadata in a table of your own
-[Drizzle](https://orm.drizzle.team) database and the bytes in a blob store —
-S3/R2 via `createS3Client()`, or any mounted Nitro storage. It uses only
-Drizzle's core query builder, so it works with every dialect and driver on
-Drizzle 0.36+ and v1.
+`createDrizzleProvider` keeps metadata in a table of your
+[Drizzle](https://orm.drizzle.team) database (any dialect, drizzle-orm 0.36+ and
+v1) and the bytes in a blob store:
 
 ```ts
 // server/db/schema.ts
-import { pgTable, text, jsonb, timestamp, index } from 'drizzle-orm/pg-core'
+import { pgTable, text, jsonb, timestamp, primaryKey } from 'drizzle-orm/pg-core'
 
 export const files = pgTable('files', {
-  id: text('id').primaryKey(),
+  id: text('id').notNull(),
   groupId: text('group_id').notNull(),
   metadata: jsonb('metadata'),
   createdAt: timestamp('created_at'), // optional
   updatedAt: timestamp('updated_at'), // optional
-}, t => [index('files_group_id_idx').on(t.groupId)])
+}, t => [primaryKey({ columns: [t.groupId, t.id] })])
 ```
 
 ```ts
-// server/plugins/file-provider.ts  (with `ablage: { provider: 'custom' }`)
+// server/plugins/storage.ts (with ablage: { provider: 'custom' })
 import { db } from '../utils/db'
 import { files } from '../db/schema'
 
 export default defineNitroPlugin(() => {
-  const { s3 } = useRuntimeConfig()
   setFileStorageProvider(createDrizzleProvider({
     db,
     table: files,
-    blobs: createS3Client({
-      accessKeyId: s3.accessKeyId,
-      secretAccessKey: s3.secretAccessKey,
-      endpoint: s3.endpoint,
-      bucket: s3.bucket,
-    }),
-    // or keep bytes on disk in the module's fs storage: blobs: 'documents'  (= `ablage.storageName`)
+    blobs: 'documents', // the module's fs mount (= ablage.storageName), or:
+    // blobs: createS3Client({ accessKeyId, secretAccessKey, endpoint, bucket }),
     // columns: { id: 'id', groupId: 'groupId', metadata: 'metadata', createdAt: 'createdAt', updatedAt: 'updatedAt' },
   }))
 })
 ```
 
-- `columns` maps to the table's schema property names, so an existing table can be used. `createdAt`/`updatedAt` are filled in when the table has them.
-- With a Postgres `jsonb` metadata column, `findByMeta()` (`@>`) and `update()` (`||` merge) run in the database — add a GIN index on `metadata` for large tables. Other column types and dialects filter and merge in JS.
-- Bytes are stored at `<groupId>/data/<id>`, the same layout as the S3 and unstorage providers, so moving metadata into a database keeps existing files readable.
+- `columns` maps to the table's schema property names, so an existing table works.
+- Ids are unique per group, so make `(groupId, id)` the primary key.
+- With a Postgres `jsonb` metadata column, `findByMeta()` and `updateMeta()` run
+  in the database (`@>` / `||`, merging concurrent updates safely); add a GIN index
+  on `metadata` for large tables. Other column types and dialects work in JS.
+- Bytes are stored at `<group>/data/<id>`, like the other providers.
 - Requires the optional `drizzle-orm` peer dependency.
 
-### Migrating from the unstorage provider
+### Your own provider
 
-Point `blobs` at the existing mount (`blobs: 'documents'`) so the bytes stay
-where they are, then copy the metadata sidecars into the table once —
-`importUnstorageMetadata` keeps ids and timestamps and skips rows that already
-exist, so re-running it is safe:
-
-```ts
-// server/tasks/ablage/import.ts  (run with `nuxi task run ablage:import`)
-import { db } from '../../utils/db'
-import { files } from '../../db/schema'
-
-export default defineTask({
-  meta: { description: 'Copy ablage metadata into the database' },
-  async run() {
-    const result = await importUnstorageMetadata({ from: 'documents', db, table: files })
-    return { result } // { imported, skipped }
-  },
-})
-```
-
-## Custom Provider
-
-For advanced use cases (other databases, external file sync), implement the `FileStorageProvider` interface and register it in a Nitro plugin:
-
-```ts
-// nuxt.config.ts
-export default defineNuxtConfig({
-  modules: ['ablage'],
-  ablage: {
-    provider: 'custom',
-  },
-})
-```
-
-```ts
-// server/plugins/file-provider.ts
-export default defineNitroPlugin(() => {
-  setFileStorageProvider({
-    async create(groupId, data, meta) {
-      // Store binary data (e.g. S3, unstorage)
-      // Store metadata (e.g. Prisma, Drizzle)
-      return { id: '...' }
-    },
-    async get(groupId, id) { /* ... */ },
-    async getData(groupId, id) { /* ... */ },
-    async getMeta(id) { /* ... */ },
-    async list(groupId) { /* ... */ },
-    async update(id, meta) { /* ... */ },
-    async remove(groupId, id) { /* ... */ },
-    async clear(groupId) { /* ... */ },
-    async has(groupId, id) { /* ... */ },
-    async findByMeta(filter) { /* ... */ },
-
-    // Optional: external file sync
-    external: {
-      async sync(groupId, id) { /* ... */ },
-      async push(groupId, id, data, meta) { /* ... */ },
-      async pull(groupId, externalRef) { /* ... */ },
-    },
-  })
-})
-```
-
-### Provider interface
+Implement `FileStorageProvider` and register it with `setFileStorageProvider()`.
+`useFileStorage()` generates ids, computes size and `etag`, sets timestamps and
+checks `overwrite` / `ifMatch`, so a provider only persists what it's given:
 
 ```ts
 interface FileStorageProvider {
-  create(groupId: string, data: Buffer | Uint8Array, meta?: FileMeta): Promise<{ id: string }>
-  get(groupId: string, id: string): Promise<StoredFile | null>
-  // Optional: metadata without the bytes. Used by sendStoredFile and the IPX
-  // route to answer 304s without reading the file; falls back to get().
-  head?(groupId: string, id: string): Promise<StoredFile | null>
-  getData(groupId: string, id: string): Promise<Buffer | null>
-  getMeta(id: string): Promise<FileMeta | null>
-  list(groupId: string): Promise<StoredFile[]>
-  update(id: string, meta: Partial<FileMeta>): Promise<void>
-  remove(groupId: string, id: string): Promise<void>
-  clear(groupId: string): Promise<void>
-  has(groupId: string, id: string): Promise<boolean>
-  findByMeta(filter: { key: string; value: unknown; groupId?: string }): Promise<StoredFile | null>
-  external?: FileStorageExternalProvider
+  /** Metadata only, or null. Must not read the bytes. */
+  head(ref: FileRef): Promise<FileObject | null>
+  /** The bytes (or a range, clamped to the size) as a stream, or null. */
+  read(ref: FileRef, range?: ByteRange): Promise<ReadableStream<Uint8Array> | null>
+  /** Store bytes and metadata, replacing any existing file at the ref. */
+  write(object: FileObject, data: Uint8Array): Promise<void>
+  /** Apply a patch (customMetadata merged shallowly), bump updatedAt; null if missing. */
+  updateMeta(ref: FileRef, patch: FileMetaPatch): Promise<FileObject | null>
+  /** Delete files; missing ones are ignored. */
+  remove(refs: FileRef[]): Promise<void>
+  /** A page of a group's files, ordered by id; `cursor` is the last id of the previous page. */
+  list(group: string, options: { limit: number, cursor?: string, prefix?: string }): Promise<ListResult>
+  /** Optional: the first file whose customMetadata[key] === value. */
+  findByMeta?(filter: { key: string, value: unknown, group?: string }): Promise<FileObject | null>
 }
 ```
 
-### Types
+## Migrating from nuxt-filer
 
-```ts
-interface FileMeta {
-  name: string
-  mime: string
-  type: string
-  version: number
-  username?: string
-  comment?: string
-  [key: string]: unknown  // extend with your own fields
-}
-
-interface StoredFile {
-  id: string
-  groupId: string
-  data?: Buffer
-  meta: FileMeta
-  external?: ExternalRef
-  createdAt?: Date
-  updatedAt?: Date
-}
-
-interface ExternalRef {
-  source: string       // e.g. 'jira', 'sharepoint'
-  externalId: string
-  externalUrl?: string
-  cachedAt?: Date
-}
-```
+See [MIGRATION.md](./MIGRATION.md) for the API changes and the helpers that
+upgrade stored metadata in place (`migrateUnstorageMetadata`, `migrateS3Metadata`,
+`migrateDrizzleMetadata`).
 
 ## Contribution
 
@@ -592,23 +496,12 @@ interface ExternalRef {
   <summary>Local development</summary>
 
   ```bash
-  # Install dependencies
-  pnpm install
-
-  # Generate type stubs
-  pnpm run dev:prepare
-
-  # Develop with the playground
-  pnpm run dev
-
-  # Run ESLint
+  pnpm install          # install dependencies
+  pnpm run dev:prepare  # generate type stubs
+  pnpm run dev          # playground
   pnpm run lint
-
-  # Run Vitest
   pnpm run test
-
-  # Release new version
-  pnpm run release
+  pnpm run test:types
   ```
 
 </details>

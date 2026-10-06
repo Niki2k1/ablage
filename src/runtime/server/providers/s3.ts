@@ -2,11 +2,10 @@ import type { ByteRange, FileObject, FileStorageProvider } from '../../../runtim
 import {
   applyPatch,
   bytesToStream,
-  deserializeObject,
   serializeObject,
   streamToBytes,
-  type SerializedFileObject,
 } from '../utils/objects';
+import { legacyToObject, parseStoredMetadata, type MigrationResult } from '../utils/legacy';
 
 /**
  * Minimal S3 object-store surface the provider needs. Abstracted so the
@@ -85,12 +84,8 @@ export function createS3Provider(options: S3ProviderOptions): FileStorageProvide
   const readObject = async (client: S3Client, key: string): Promise<FileObject | null> => {
     const body = await client.get(key);
     if (!body) return null;
-    try {
-      return deserializeObject(JSON.parse(new TextDecoder().decode(await streamToBytes(body))) as SerializedFileObject);
-    }
-    catch {
-      return null;
-    }
+    // 0.0.x metadata is ignored until migrateS3Metadata() converts it.
+    return parseStoredMetadata(new TextDecoder().decode(await streamToBytes(body)))?.current ?? null;
   };
   const writeObject = (client: S3Client, object: FileObject) =>
     client.put(
@@ -157,6 +152,50 @@ export function createS3Provider(options: S3ProviderOptions): FileStorageProvide
       return null;
     },
   };
+}
+
+/**
+ * Upgrade a bucket written by nuxt-filer 0.0.x's S3 provider, in place: every
+ * `<group>/meta/<id>` object in the old format is rewritten as a FileObject
+ * (`size` and `etag` computed from the data object), and data objects without
+ * metadata get one. Data objects are not touched. Safe to re-run. Takes the
+ * same options as {@link createS3Provider}.
+ */
+export async function migrateS3Metadata(options: S3ProviderOptions): Promise<MigrationResult> {
+  const client = options.client ?? await createAwsS3Client(options);
+  const prefix = options.prefix ? options.prefix.replace(/\/+$/, '') + '/' : '';
+  const result: MigrationResult = { migrated: 0, skipped: 0, orphaned: [] };
+
+  const split = (key: string, kind: 'data' | 'meta') => {
+    const rel = key.slice(prefix.length);
+    const at = rel.lastIndexOf(`/${kind}/`);
+    return at > 0 ? { group: rel.slice(0, at), id: rel.slice(at + kind.length + 2) } : null;
+  };
+
+  const keys: string[] = [];
+  for await (const key of client.listKeys(prefix)) keys.push(key);
+  const dataKeys = new Set(keys.filter((key) => split(key, 'data')));
+  for (const key of keys) {
+    const meta = split(key, 'meta');
+    if (meta && !dataKeys.has(`${prefix}${meta.group}/data/${meta.id}`)) result.orphaned.push(key);
+  }
+
+  await mapWithConcurrency([...dataKeys], 8, async (dataKey) => {
+    const ref = split(dataKey, 'data')!;
+    const metaKey = `${prefix}${ref.group}/meta/${ref.id}`;
+    const metaBody = await client.get(metaKey);
+    const parsed = metaBody ? parseStoredMetadata(new TextDecoder().decode(await streamToBytes(metaBody))) : null;
+    if (parsed?.current) {
+      result.skipped++;
+      return;
+    }
+    const dataBody = await client.get(dataKey);
+    if (!dataBody) return;
+    const object = await legacyToObject(ref, parsed?.legacy, await streamToBytes(dataBody));
+    await client.put(metaKey, new TextEncoder().encode(JSON.stringify(serializeObject(object))), 'application/json');
+    result.migrated++;
+  });
+  return result;
 }
 
 /**
