@@ -194,6 +194,18 @@ export interface TusPromoteOptions extends Pick<PutOptions, 'id' | 'overwrite' |
   removeStaged?: boolean;
 }
 
+/** Options for a provider's `presignRead()`. */
+export interface PresignReadOptions {
+  /** Lifetime of the URL in seconds. */
+  expiresIn: number;
+  /** Headers the store should answer with, overriding what it has stored. */
+  responseHeaders: {
+    'content-type': string;
+    'content-disposition': string;
+    'cache-control': string;
+  };
+}
+
 /**
  * The storage backend behind `useFileStorage()`. Implement it to store files
  * anywhere; register it with `setFileStorageProvider()` in a Nitro plugin.
@@ -219,4 +231,10 @@ export interface FileStorageProvider {
   list(group: string, options: Required<Pick<ListOptions, 'limit'>> & Omit<ListOptions, 'limit'>): Promise<ListResult>;
   /** Optional: the first file whose `customMetadata[key] === value`. */
   findByMeta?(filter: { key: string; value: unknown; group?: string }): Promise<FileObject | null>;
+  /**
+   * Optional: a URL the client can fetch the bytes from directly, bypassing
+   * the app server (e.g. a presigned S3 GET). `signedUrl()` returns it
+   * instead of a link to the module's file route.
+   */
+  presignRead?(ref: FileRef, options: PresignReadOptions): Promise<string>;
 }

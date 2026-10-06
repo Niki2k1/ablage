@@ -1,4 +1,4 @@
-import type { ByteRange, FileObject, FileStorageProvider } from '../../../runtime/types';
+import type { ByteRange, FileObject, FileStorageProvider, PresignReadOptions } from '../../../runtime/types';
 import {
   applyPatch,
   bytesToStream,
@@ -25,13 +25,24 @@ export interface S3Client {
   delete(key: string): Promise<void>;
   /** Keys under `prefix` in ascending order, optionally only those after `startAfter`. */
   listKeys(prefix: string, options?: { startAfter?: string }): AsyncGenerator<string, void, unknown>;
+  /** Optional: a presigned GET URL for `key`. The default client has it when `publicEndpoint` is set. */
+  presignGet?(key: string, options: PresignReadOptions): Promise<string>;
 }
+
+/** SigV4 presigned URLs can't live longer than 7 days. */
+export const MAX_PRESIGN_EXPIRES_IN = 7 * 24 * 60 * 60;
 
 export interface S3ProviderOptions {
   accessKeyId?: string;
   secretAccessKey?: string;
   /** S3 API endpoint, e.g. https://<acct>.r2.cloudflarestorage.com */
   endpoint?: string;
+  /**
+   * Endpoint browsers reach the bucket on, e.g. https://s3.example.com while
+   * `endpoint` is http://garage:3900. When set, `signedUrl()` returns a
+   * presigned GET on it, so downloads (with `Range`) skip the app server.
+   */
+  publicEndpoint?: string;
   /** SigV4 region. R2 uses 'auto' (the default). */
   region?: string;
   bucket?: string;
@@ -80,6 +91,7 @@ export function createS3Provider(options: S3ProviderOptions): FileStorageProvide
   const dataKey = (group: string, id: string) => `${prefix}${group}/data/${id}`;
   const metaKey = (group: string, id: string) => `${prefix}${group}/meta/${id}`;
   const metaPrefix = (group: string) => `${prefix}${group}/meta/`;
+  const canPresign = options.client ? !!options.client.presignGet : !!options.publicEndpoint;
 
   const readObject = async (client: S3Client, key: string): Promise<FileObject | null> => {
     const body = await client.get(key);
@@ -151,6 +163,10 @@ export function createS3Provider(options: S3ProviderOptions): FileStorageProvide
       }
       return null;
     },
+
+    ...(canPresign
+      ? { presignRead: async (ref, presignOptions) => (await getClient()).presignGet!(dataKey(ref.group, ref.id), presignOptions) }
+      : {}),
   };
 }
 
@@ -215,6 +231,9 @@ export function createS3Client(
     async *listKeys(keyPrefix, listOptions) {
       yield* (await getClient()).listKeys(keyPrefix, listOptions);
     },
+    ...(options.publicEndpoint
+      ? { presignGet: async (key: string, presignOptions: PresignReadOptions) => (await getClient()).presignGet!(key, presignOptions) }
+      : {}),
   };
 }
 
@@ -242,9 +261,10 @@ async function createAwsS3Client(options: S3ProviderOptions): Promise<S3Client> 
     region: options.region || 'auto',
   });
 
-  const base = `${options.endpoint!.replace(/\/+$/, '')}/${options.bucket}`;
-  const objectUrl = (key: string) =>
-    `${base}/${key.split('/').map(encodeURIComponent).join('/')}`;
+  const bucketUrl = (endpoint: string) => `${endpoint.replace(/\/+$/, '')}/${options.bucket}`;
+  const base = bucketUrl(options.endpoint!);
+  const keyPath = (key: string) => key.split('/').map(encodeURIComponent).join('/');
+  const objectUrl = (key: string) => `${base}/${keyPath(key)}`;
 
   const signedFetch = (url: string, init?: RequestInit) =>
     aws.sign(url, init).then((req) => fetch(req));
@@ -312,7 +332,32 @@ async function createAwsS3Client(options: S3ProviderOptions): Promise<S3Client> 
           matchTag(xml, 'IsTruncated') === 'true' ? matchTag(xml, 'NextContinuationToken') : undefined;
       } while (token);
     },
+    ...(options.publicEndpoint
+      ? {
+          async presignGet(key: string, { expiresIn, responseHeaders }: PresignReadOptions) {
+            if (expiresIn > MAX_PRESIGN_EXPIRES_IN) {
+              throw new Error(`[ablage] S3 presigned URLs expire after at most ${MAX_PRESIGN_EXPIRES_IN} seconds (7 days); got expiresIn: ${expiresIn}`);
+            }
+            const url = new URL(`${bucketUrl(options.publicEndpoint!)}/${keyPath(key)}`);
+            url.searchParams.set('X-Amz-Expires', String(expiresIn));
+            for (const [name, value] of Object.entries(responseHeaders)) {
+              url.searchParams.set(`response-${name}`, value);
+            }
+            const signed = new URL((await aws.sign(url.toString(), { method: 'GET', aws: { signQuery: true } })).url);
+            // URLSearchParams writes spaces as `+`, which S3-compatible stores
+            // don't all decode as a space; send the RFC 3986 form that was signed.
+            signed.search = [...signed.searchParams]
+              .map((pair) => pair.map(encodeRfc3986).join('='))
+              .join('&');
+            return signed.toString();
+          },
+        }
+      : {}),
   };
+}
+
+function encodeRfc3986(value: string): string {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
 function parseListKeys(xml: string): string[] {
