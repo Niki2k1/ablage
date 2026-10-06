@@ -52,7 +52,7 @@ export function runDrizzleSuite({ pgCore, drizzle, PGlite, storage }: DrizzleMod
 
   for (const metaType of ['jsonb', 'json'] as const) {
     describe(`metadata as ${metaType}`, () => {
-      const files = pgTable('filer_files', {
+      const files = pgTable('ablage_files', {
         id: text('id').primaryKey(),
         groupId: text('group_id').notNull(),
         metadata: metaType === 'jsonb' ? jsonb('metadata') : json('metadata'),
@@ -67,7 +67,7 @@ export function runDrizzleSuite({ pgCore, drizzle, PGlite, storage }: DrizzleMod
 
       beforeEach(async () => {
         const client = new PGlite();
-        await client.exec(`create table filer_files (
+        await client.exec(`create table ablage_files (
           id text primary key,
           group_id text not null,
           metadata ${metaType},
@@ -178,7 +178,7 @@ export function runDrizzleSuite({ pgCore, drizzle, PGlite, storage }: DrizzleMod
 
       it('removes the blob when the insert fails', async () => {
         const { provider, store, client } = setup;
-        await client.exec('drop table filer_files');
+        await client.exec('drop table ablage_files');
         await expect(provider.create('g', Buffer.from('x'), meta())).rejects.toThrow();
         expect(store.size).toBe(0);
       });
@@ -214,7 +214,7 @@ export function runDrizzleSuite({ pgCore, drizzle, PGlite, storage }: DrizzleMod
   });
 
   describe('with a Nitro storage mount', () => {
-    const table = pgTable('filer_files', {
+    const table = pgTable('ablage_files', {
       id: text('id').primaryKey(),
       groupId: text('group_id').notNull(),
       metadata: jsonb('metadata'),
@@ -224,7 +224,7 @@ export function runDrizzleSuite({ pgCore, drizzle, PGlite, storage }: DrizzleMod
     const setup = async () => {
       await storage.clear('documents');
       const client = new PGlite();
-      await client.exec(`create table filer_files (
+      await client.exec(`create table ablage_files (
         id text primary key, group_id text not null, metadata jsonb,
         created_at timestamp, updated_at timestamp
       )`);

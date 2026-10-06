@@ -8,7 +8,7 @@ import {
 } from 'h3';
 import type { ServerOptions } from '@tus/server';
 // @ts-expect-error virtual module injected by the module
-import { tusRoute } from '#nuxt-filer-tus';
+import { tusRoute } from '#ablage-tus';
 import { useTusServer, useTusStaging, isSafeTusId } from '../utils/tus';
 
 type IncomingRequestHook = NonNullable<ServerOptions['onIncomingRequest']>;

@@ -1,6 +1,6 @@
 <template>
   <div style="max-width: 600px; margin: 2rem auto; font-family: sans-serif">
-    <h1>nuxt-filer playground</h1>
+    <h1>ablage playground</h1>
 
     <div>
       <label>
@@ -57,7 +57,7 @@
         <strong>{{ file.meta.name }}</strong> ({{ file.meta.mime }}) — {{ file.id }}
         <div v-if="file.meta.mime?.startsWith('image/')" style="margin-top: 0.5rem; display: flex; gap: 1rem">
           <NuxtImg
-            provider="filer"
+            provider="ablage"
             :src="`${file.groupId}/${file.id}`"
             :width="96"
             :height="96"
@@ -65,7 +65,7 @@
             format="webp"
             alt="thumbnail via IPX"
           />
-          <code>provider=filer src={{ file.groupId }}/{{ file.id }}</code>
+          <code>provider=ablage src={{ file.groupId }}/{{ file.id }}</code>
         </div>
       </li>
     </ul>

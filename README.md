@@ -1,11 +1,13 @@
-# nuxt-filer
+# ablage
 
 [![npm version][npm-version-src]][npm-version-href]
 [![npm downloads][npm-downloads-src]][npm-downloads-href]
 [![License][license-src]][license-href]
 [![Nuxt][nuxt-src]][nuxt-href]
 
-File storage module for Nuxt. Provides a server-side `useFileStorage()` composable with pluggable storage backends — from zero-config local filesystem to custom providers with separate metadata databases and external file sync.
+> **ablage** is the new name of [`nuxt-filer`](https://www.npmjs.com/package/nuxt-filer), starting with v0.1.0. v0.1.0 also changes the API (see [#21](https://github.com/Niki2k1/ablage/issues/21)); a migration guide follows with the release.
+
+File storage module for Nuxt (≥ 4.6, Node ≥ 22). Provides a server-side `useFileStorage()` composable with pluggable storage backends — from zero-config local filesystem to custom providers with separate metadata databases and external file sync.
 
 ## Features
 
@@ -15,14 +17,14 @@ File storage module for Nuxt. Provides a server-side `useFileStorage()` composab
 - **Zero-config default** — works out of the box with local filesystem storage, no database required
 - **Auto-imported** — `useFileStorage()`, types, and provider utilities are auto-imported in server context
 - **Group-based organization** — files are organized by `groupId` (project, ticket, order, etc.)
-- **`@nuxt/image` integration** — when `@nuxt/image` is installed, an IPX endpoint is wired up automatically so `<NuxtImg provider="filer" src="<groupId>/<id>" />` returns optimized variants of stored files
+- **`@nuxt/image` integration** — when `@nuxt/image` is installed, an IPX endpoint is wired up automatically so `<NuxtImg provider="ablage" src="<groupId>/<id>" />` returns optimized variants of stored files
 - **Upload-time image processing** — optionally run images through Sharp when storing them (resize, format-convert, optimize, preserve animation) via a per-call `transform` option or the standalone `transformImage()` util
 - **Resumable uploads (tus)** — opt-in [tus](https://tus.io) endpoint backed by `@tus/server`, a client-side `useTusUpload()` composable, and `useTusStaging().promote()` to move finished uploads into the file storage
 
 ## Quick Setup
 
 ```bash
-npx nuxi module add nuxt-filer
+npx nuxi module add ablage
 ```
 
 ## Configuration
@@ -30,8 +32,8 @@ npx nuxi module add nuxt-filer
 ```ts
 // nuxt.config.ts
 export default defineNuxtConfig({
-  modules: ['nuxt-filer'],
-  filer: {
+  modules: ['ablage'],
+  ablage: {
     // Nitro storage mount name (default: 'documents'). Mounted on the local fs
     // for every provider unless you configure it yourself under `nitro.storage`.
     storageName: 'documents',
@@ -222,12 +224,12 @@ sendStoredFile(event, groupId, id, {
 
 ## `@nuxt/image` Integration
 
-If `@nuxt/image` is installed alongside `nuxt-filer`, the module automatically registers a `filer` image provider and an IPX endpoint that pulls bytes from your storage provider, runs them through Sharp, and returns the result.
+If `@nuxt/image` is installed alongside `ablage`, the module automatically registers an `ablage` image provider and an IPX endpoint that pulls bytes from your storage provider, runs them through Sharp, and returns the result.
 
 ```vue
 <template>
   <NuxtImg
-    provider="filer"
+    provider="ablage"
     :src="`${groupId}/${fileId}`"
     width="200"
     height="200"
@@ -237,16 +239,16 @@ If `@nuxt/image` is installed alongside `nuxt-filer`, the module automatically r
 </template>
 ```
 
-Generated URLs look like `/_filer-ipx/w_200,h_200,fit_cover,format_webp/<groupId>/<fileId>` and are served with `cache-control: max-age=...`, `last-modified`, and `etag` for `if-modified-since` / `if-none-match` revalidation.
+Generated URLs look like `/_ablage/image/w_200,h_200,fit_cover,format_webp/<groupId>/<fileId>` and are served with `cache-control: max-age=...`, `last-modified`, and `etag` for `if-modified-since` / `if-none-match` revalidation.
 
 The integration can be configured or turned off:
 
 ```ts
-filer: {
+ablage: {
   image: {
     enabled: true,            // false to disable; 'force' to register without @nuxt/image
-    route: '/_filer-ipx',     // base path for the IPX endpoint
-    providerName: 'filer',    // name used in <NuxtImg provider="..." />
+    route: '/_ablage/image',     // base path for the IPX endpoint
+    providerName: 'ablage',    // name used in <NuxtImg provider="..." />
   },
 },
 ```
@@ -259,7 +261,7 @@ Image processing can run in a separate service instead of this server, so
 `sharp` and `ipx` aren't needed here and one service can serve many apps:
 
 ```ts
-filer: {
+ablage: {
   image: {
     service: 'imgproxy', // or 'ipx' for a standalone `npx ipx serve`; default 'local'
   },
@@ -267,20 +269,20 @@ filer: {
 ```
 
 ```bash
-NUXT_FILER_IMAGE_BASE_URL=https://img.example.com
-NUXT_FILER_IMAGE_KEY=...           # imgproxy signing key + salt (hex); unsigned URLs when unset
-NUXT_FILER_IMAGE_SALT=...
-NUXT_FILER_IMAGE_SOURCE_URL=http://app:3000   # how the service reaches this app
+NUXT_ABLAGE_IMAGE_BASE_URL=https://img.example.com
+NUXT_ABLAGE_IMAGE_KEY=...           # imgproxy signing key + salt (hex); unsigned URLs when unset
+NUXT_ABLAGE_IMAGE_SALT=...
+NUXT_ABLAGE_IMAGE_SOURCE_URL=http://app:3000   # how the service reaches this app
 ```
 
-- `<NuxtImg provider="filer">` works unchanged. The image route redirects to a
+- `<NuxtImg provider="ablage">` works unchanged. The image route redirects to a
   signed service URL, so the signing key never reaches the browser.
-- The service fetches originals from `/_filer-ipx/_/<groupId>/<fileId>`, which
+- The service fetches originals from `/_ablage/image/_/<groupId>/<fileId>`, which
   serves the stored bytes. `sourceURL` is the origin it uses for that — e.g. the
   app's address on a private Docker network. Without it, the request's origin
   is used.
 - Upload-time transforms (`upload(..., { transform })`) go through the service
-  too: the original is staged under the `_filer-transform` group, the variant
+  too: the original is staged under the `_ablage-transform` group, the variant
   is fetched, and the staged copy is removed. This requires `sourceURL`.
   `transformImage()` itself still needs `sharp`.
 - imgproxy receives the IPX modifiers translated to its options (`w`, `h`,
@@ -302,11 +304,11 @@ where you enforce auth and attach domain metadata.
 ```ts
 // nuxt.config.ts
 export default defineNuxtConfig({
-  modules: ['nuxt-filer'],
-  filer: {
+  modules: ['ablage'],
+  ablage: {
     tus: {
       enabled: true,
-      route: '/_filer-tus',            // default
+      route: '/_ablage/tus',            // default
       stagingDir: '.data/tus',         // default
       maxSize: 500 * 1024 * 1024,      // optional, bytes
       expiration: 24 * 60 * 60 * 1000, // optional: purge stale staged uploads
@@ -398,8 +400,8 @@ correctly scoped even inside a large or shared bucket.
 ```ts
 // nuxt.config.ts
 export default defineNuxtConfig({
-  modules: ['nuxt-filer'],
-  filer: { provider: 'custom' },
+  modules: ['ablage'],
+  ablage: { provider: 'custom' },
 })
 ```
 
@@ -432,32 +434,32 @@ Drizzle 0.36+ and v1.
 // server/db/schema.ts
 import { pgTable, text, jsonb, timestamp, index } from 'drizzle-orm/pg-core'
 
-export const filerFiles = pgTable('filer_files', {
+export const files = pgTable('files', {
   id: text('id').primaryKey(),
   groupId: text('group_id').notNull(),
   metadata: jsonb('metadata'),
   createdAt: timestamp('created_at'), // optional
   updatedAt: timestamp('updated_at'), // optional
-}, t => [index('filer_files_group_id_idx').on(t.groupId)])
+}, t => [index('files_group_id_idx').on(t.groupId)])
 ```
 
 ```ts
-// server/plugins/file-provider.ts  (with `filer: { provider: 'custom' }`)
+// server/plugins/file-provider.ts  (with `ablage: { provider: 'custom' }`)
 import { db } from '../utils/db'
-import { filerFiles } from '../db/schema'
+import { files } from '../db/schema'
 
 export default defineNitroPlugin(() => {
   const { s3 } = useRuntimeConfig()
   setFileStorageProvider(createDrizzleProvider({
     db,
-    table: filerFiles,
+    table: files,
     blobs: createS3Client({
       accessKeyId: s3.accessKeyId,
       secretAccessKey: s3.secretAccessKey,
       endpoint: s3.endpoint,
       bucket: s3.bucket,
     }),
-    // or keep bytes on disk in the module's fs storage: blobs: 'documents'  (= `filer.storageName`)
+    // or keep bytes on disk in the module's fs storage: blobs: 'documents'  (= `ablage.storageName`)
     // columns: { id: 'id', groupId: 'groupId', metadata: 'metadata', createdAt: 'createdAt', updatedAt: 'updatedAt' },
   }))
 })
@@ -476,14 +478,14 @@ where they are, then copy the metadata sidecars into the table once —
 exist, so re-running it is safe:
 
 ```ts
-// server/tasks/filer/import.ts  (run with `nuxi task run filer:import`)
+// server/tasks/ablage/import.ts  (run with `nuxi task run ablage:import`)
 import { db } from '../../utils/db'
-import { filerFiles } from '../../db/schema'
+import { files } from '../../db/schema'
 
 export default defineTask({
-  meta: { description: 'Copy nuxt-filer metadata into the database' },
+  meta: { description: 'Copy ablage metadata into the database' },
   async run() {
-    const result = await importUnstorageMetadata({ from: 'documents', db, table: filerFiles })
+    const result = await importUnstorageMetadata({ from: 'documents', db, table: files })
     return { result } // { imported, skipped }
   },
 })
@@ -496,8 +498,8 @@ For advanced use cases (other databases, external file sync), implement the `Fil
 ```ts
 // nuxt.config.ts
 export default defineNuxtConfig({
-  modules: ['nuxt-filer'],
-  filer: {
+  modules: ['ablage'],
+  ablage: {
     provider: 'custom',
   },
 })
@@ -617,11 +619,11 @@ interface ExternalRef {
 
 <!-- Badges -->
 
-[npm-version-src]: https://img.shields.io/npm/v/nuxt-filer/latest.svg?style=flat&colorA=020420&colorB=00DC82
-[npm-version-href]: https://npmjs.com/package/nuxt-filer
-[npm-downloads-src]: https://img.shields.io/npm/dm/nuxt-filer.svg?style=flat&colorA=020420&colorB=00DC82
-[npm-downloads-href]: https://npm.chart.dev/nuxt-filer
-[license-src]: https://img.shields.io/npm/l/nuxt-filer.svg?style=flat&colorA=020420&colorB=00DC82
-[license-href]: https://npmjs.com/package/nuxt-filer
+[npm-version-src]: https://img.shields.io/npm/v/ablage/latest.svg?style=flat&colorA=020420&colorB=00DC82
+[npm-version-href]: https://npmjs.com/package/ablage
+[npm-downloads-src]: https://img.shields.io/npm/dm/ablage.svg?style=flat&colorA=020420&colorB=00DC82
+[npm-downloads-href]: https://npm.chart.dev/ablage
+[license-src]: https://img.shields.io/npm/l/ablage.svg?style=flat&colorA=020420&colorB=00DC82
+[license-href]: https://npmjs.com/package/ablage
 [nuxt-src]: https://img.shields.io/badge/Nuxt-020420?logo=nuxt.js
 [nuxt-href]: https://nuxt.com

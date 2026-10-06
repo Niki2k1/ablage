@@ -4,7 +4,7 @@ export default defineNuxtConfig({
   modules: [
     MyModule,
   ],
-  filer: {
+  ablage: {
     storageName: 'documents',
     storagePath: '.data/test-tus-documents',
     provider: 'unstorage',

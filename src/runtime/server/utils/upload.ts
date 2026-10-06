@@ -44,7 +44,7 @@ const UNITS: Record<string, number> = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 
 export function parseSize(size: number | string): number {
   if (typeof size === 'number') return size;
   const match = size.trim().toUpperCase().match(/^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB)$/);
-  if (!match) throw new Error(`[nuxt-filer] invalid size "${size}" (use e.g. 500KB, 2MB, 1GB)`);
+  if (!match) throw new Error(`[ablage] invalid size "${size}" (use e.g. 500KB, 2MB, 1GB)`);
   return Math.floor(Number(match[1]) * UNITS[match[2]!]!);
 }
 

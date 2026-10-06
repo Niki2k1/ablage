@@ -271,7 +271,7 @@ export function createS3Client(
 async function createAwsS3Client(options: S3ProviderOptions): Promise<S3Client> {
   for (const key of ['accessKeyId', 'secretAccessKey', 'endpoint', 'bucket'] as const) {
     if (!options[key]) {
-      throw new Error(`[nuxt-filer] createS3Provider: missing required option "${key}"`);
+      throw new Error(`[ablage] createS3Provider: missing required option "${key}"`);
     }
   }
 
@@ -280,7 +280,7 @@ async function createAwsS3Client(options: S3ProviderOptions): Promise<S3Client> 
     ({ AwsClient } = await import('aws4fetch'));
   } catch {
     throw new Error(
-      '[nuxt-filer] createS3Provider needs the optional "aws4fetch" dependency. Install it: npm i aws4fetch',
+      '[ablage] createS3Provider needs the optional "aws4fetch" dependency. Install it: npm i aws4fetch',
     );
   }
 
@@ -306,14 +306,14 @@ async function createAwsS3Client(options: S3ProviderOptions): Promise<S3Client> 
         headers: contentType ? { 'content-type': contentType } : undefined,
       });
       if (!res.ok) {
-        throw new Error(`[nuxt-filer] S3 PUT ${key}: ${res.status} ${res.statusText}`);
+        throw new Error(`[ablage] S3 PUT ${key}: ${res.status} ${res.statusText}`);
       }
     },
     async get(key) {
       const res = await signedFetch(objectUrl(key));
       if (res.status === 404) return null;
       if (!res.ok) {
-        throw new Error(`[nuxt-filer] S3 GET ${key}: ${res.status} ${res.statusText}`);
+        throw new Error(`[ablage] S3 GET ${key}: ${res.status} ${res.statusText}`);
       }
       return Buffer.from(await res.arrayBuffer());
     },
@@ -321,14 +321,14 @@ async function createAwsS3Client(options: S3ProviderOptions): Promise<S3Client> 
       const res = await signedFetch(objectUrl(key), { method: 'HEAD' });
       if (res.status === 404) return false;
       if (!res.ok) {
-        throw new Error(`[nuxt-filer] S3 HEAD ${key}: ${res.status} ${res.statusText}`);
+        throw new Error(`[ablage] S3 HEAD ${key}: ${res.status} ${res.statusText}`);
       }
       return true;
     },
     async delete(key) {
       const res = await signedFetch(objectUrl(key), { method: 'DELETE' });
       if (!res.ok && res.status !== 404) {
-        throw new Error(`[nuxt-filer] S3 DELETE ${key}: ${res.status} ${res.statusText}`);
+        throw new Error(`[ablage] S3 DELETE ${key}: ${res.status} ${res.statusText}`);
       }
     },
     async *listKeys(keyPrefix) {
@@ -341,7 +341,7 @@ async function createAwsS3Client(options: S3ProviderOptions): Promise<S3Client> 
 
         const res = await signedFetch(url.toString());
         if (!res.ok) {
-          throw new Error(`[nuxt-filer] S3 LIST ${keyPrefix}: ${res.status} ${res.statusText}`);
+          throw new Error(`[ablage] S3 LIST ${keyPrefix}: ${res.status} ${res.statusText}`);
         }
         const xml = await res.text();
         for (const key of parseListKeys(xml)) yield key;

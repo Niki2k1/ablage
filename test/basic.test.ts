@@ -32,7 +32,7 @@ interface DuplicateResult {
 // Wipe persisted storage so tests start from a clean slate.
 await rm(fileURLToPath(new URL('../.data/test-documents', import.meta.url)), { recursive: true, force: true })
 
-describe('nuxt-filer', async () => {
+describe('ablage', async () => {
   await setup({
     rootDir: fixtureRoot,
   })

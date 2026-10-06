@@ -1,12 +1,12 @@
 import MyModule from '../../../src/module'
 
-// Service URL, signing secrets and source origin come from NUXT_FILER_IMAGE_*
+// Service URL, signing secrets and source origin come from NUXT_ABLAGE_IMAGE_*
 // env vars set by the test, like they would in a deployment.
 export default defineNuxtConfig({
   modules: [
     MyModule,
   ],
-  filer: {
+  ablage: {
     storageName: 'documents',
     storagePath: '.data/test-image-service',
     provider: 'unstorage',

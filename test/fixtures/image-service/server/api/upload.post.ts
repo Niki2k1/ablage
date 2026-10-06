@@ -5,5 +5,5 @@ export default defineEventHandler(async (event) => {
     meta: body.meta,
     transform: body.transform,
   })
-  return { id, meta: await storage.getMeta(id), staged: await storage.list('_filer-transform') }
+  return { id, meta: await storage.getMeta(id), staged: await storage.list('_ablage-transform') }
 })

@@ -38,7 +38,7 @@ function encodeMetadata(metadata: Record<string, string>): string {
 }
 
 async function createUpload(content: string, metadata: Record<string, string>) {
-  const res = await fetch('/_filer-tus', {
+  const res = await fetch('/_ablage/tus', {
     method: 'POST',
     headers: {
       ...TUS,
@@ -71,13 +71,13 @@ async function headUpload(uploadPath: string) {
   return await fetch(uploadPath, { method: 'HEAD', headers: { ...TUS } })
 }
 
-describe('nuxt-filer tus', async () => {
+describe('ablage tus', async () => {
   await setup({
     rootDir: fixtureRoot,
   })
 
   it('answers OPTIONS with tus capabilities', async () => {
-    const res = await fetch('/_filer-tus', { method: 'OPTIONS' })
+    const res = await fetch('/_ablage/tus', { method: 'OPTIONS' })
     expect([200, 204]).toContain(res.status)
     expect(res.headers.get('tus-version')).toBeTruthy()
     expect(res.headers.get('tus-extension')).toContain('creation')
@@ -225,7 +225,7 @@ describe('nuxt-filer tus', async () => {
     const b = await createUpload('beacon b', { filename: 'b.txt', filetype: 'text/plain' })
     await patchUpload(a.uploadPath, 'beacon a', 0)
 
-    const res = await fetch('/_filer-tus/cleanup', {
+    const res = await fetch('/_ablage/tus/cleanup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tusIds: [a.tusId, b.tusId, '../evil', 42] }),
@@ -237,7 +237,7 @@ describe('nuxt-filer tus', async () => {
   })
 
   it('enforces maxSize at creation time', async () => {
-    const res = await fetch('/_filer-tus', {
+    const res = await fetch('/_ablage/tus', {
       method: 'POST',
       headers: {
         ...TUS,
