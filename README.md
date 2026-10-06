@@ -187,6 +187,10 @@ Links are signed with HMAC-SHA256 using a key derived from Nuxt's `appSecret`,
 so set `NUXT_APP_SECRET` (at least 32 characters). Tampered or expired links get
 a 403; valid ones are cached privately until they expire.
 
+With the S3 provider and a `publicEndpoint`, `signedUrl()` returns a presigned
+S3 `GET` instead, so the bucket serves the bytes (and `Range` requests) directly
+and the app server never holds the file. See [S3](#s3--cloudflare-r2--minio).
+
 ### Validating uploads
 
 `readUploadedFile()` reads a file from a `multipart/form-data` request and
@@ -405,6 +409,7 @@ export default defineNitroPlugin(() => {
     region: s3.region,       // R2: 'auto' (default)
     bucket: s3.bucket,
     // prefix: 'media/',     // namespace within a shared bucket
+    // publicEndpoint: 'https://s3.example.com', // presigned signedUrl() links
   }))
 })
 ```
@@ -415,6 +420,24 @@ ranged reads use S3 `Range` requests, and `list()` pages with S3 prefix listing.
 Requires the optional [`aws4fetch`](https://github.com/mhart/aws4fetch) peer
 dependency. `createS3Client(options)` gives you the same client on its own (e.g.
 as a Drizzle blob store).
+
+#### Direct downloads
+
+Set `publicEndpoint` to the address browsers reach the bucket on, and
+`signedUrl()` returns a presigned `GET` for the data object there instead of a
+link to the module's file route. It can differ from `endpoint`, e.g. when the
+app talks to `http://garage:3900` internally. The link sets `content-type`,
+`content-disposition` (`download: true` → attachment with the stored name) and
+`cache-control: private` through S3's `response-*` overrides.
+
+- Pass the `FileObject` (as returned by `put()`/`head()`/`list()`) rather than a
+  bare `{ group, id }`; otherwise `signedUrl()` reads the metadata first.
+- `expiresIn` is capped at 7 days by SigV4; longer values throw.
+- The bucket's `etag` and `last-modified` are served, not the module's.
+- Links are path-style (`<publicEndpoint>/<bucket>/<key>`). R2 custom domains
+  don't accept presigned URLs; use the `r2.cloudflarestorage.com` endpoint.
+- A Drizzle provider whose `blobs` is `createS3Client({ ..., publicEndpoint })`
+  presigns the same way.
 
 ### Drizzle (metadata in your database)
 

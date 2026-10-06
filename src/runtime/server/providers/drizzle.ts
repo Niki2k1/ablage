@@ -5,6 +5,7 @@ import type {
   FileObject,
   FileRef,
   FileStorageProvider,
+  PresignReadOptions,
 } from '../../../runtime/types';
 import { applyPatch, rangeStream, streamToBytes } from '../utils/objects';
 import { legacyToObject, parseStoredMetadata, type MigrationResult } from '../utils/legacy';
@@ -19,6 +20,8 @@ export interface BlobStore {
   /** The bytes (or a range, clamped to their size) as a stream; `null` if missing. */
   get(key: string, range?: ByteRange): Promise<ReadableStream<Uint8Array> | null>;
   delete(key: string): Promise<void>;
+  /** Optional: a presigned GET URL for `key`, enabling direct downloads. */
+  presignGet?(key: string, options: PresignReadOptions): Promise<string>;
 }
 
 /**
@@ -331,6 +334,10 @@ export function createDrizzleProvider(options: DrizzleProviderOptions): FileStor
       }
       return null;
     },
+
+    ...(blobs.presignGet
+      ? { presignRead: (ref: FileRef, presignOptions: PresignReadOptions) => blobs.presignGet!(blobKey(ref.group, ref.id), presignOptions) }
+      : {}),
   };
 }
 

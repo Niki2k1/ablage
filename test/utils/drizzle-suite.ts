@@ -104,6 +104,22 @@ export function runDrizzleSuite({ pgCore, drizzle, PGlite, storage }: DrizzleMod
       expect(await ctx.storage.head(put)).toMatchObject({ name: 'n.txt', customMetadata: { a: 1, b: 2 } })
     })
 
+    it('signedUrl() presigns through the blob store when it can', async () => {
+      const db = await freshDb('jsonb')
+      const blobs = memoryBlobs()
+      const keys: string[] = []
+      blobs.blobs.presignGet = async (key) => {
+        keys.push(key)
+        return `https://s3.example.com/${key}`
+      }
+      setFileStorageProvider(createDrizzleProvider({ db: db.db, table: makeTable('jsonb'), blobs: blobs.blobs }))
+      const storage = useFileStorage()
+      const put = await storage.put('g', new Uint8Array(1))
+      expect(await storage.signedUrl(put)).toBe(`https://s3.example.com/${keys[0]}`)
+      expect(keys[0]).toContain(put.id)
+      expect(await ctx.storage.signedUrl(put)).toMatch(/^\/_ablage\/file\/g\//)
+    })
+
     it('removes the blob when the row insert fails', async () => {
       await ctx.client.exec('drop table ablage_files')
       await expect(ctx.storage.put('g', new Uint8Array(1))).rejects.toThrow()

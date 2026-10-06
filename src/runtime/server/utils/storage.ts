@@ -17,6 +17,7 @@ import { fileRoute, imageRouteEnabled, ipxRoute } from '#ablage-image';
 import { useFileStorageProvider } from '../provider';
 import { stringifyModifiers, transformToModifiers, type ImageModifiers } from './image-service';
 import { refPath, signFileClaims } from './signing';
+import { contentDisposition } from './send';
 import { transformImage } from './image';
 import { transformWithService, useImageService } from './image-service-runtime';
 import {
@@ -47,6 +48,10 @@ const DEFAULT_LIST_LIMIT = 1000;
 
 /** `deriveSecret()` purpose for signed file URLs; the file route verifies with the same key. */
 export const SIGNING_PURPOSE = 'ablage:signed-url';
+
+function isFileObject(ref: FileRef): ref is FileObject {
+  return 'contentType' in ref && 'etag' in ref;
+}
 
 const TRANSFORM_KEYS = new Set(['width', 'height', 'fit', 'withoutEnlargement', 'format', 'quality', 'animated', 'background']);
 function isTransformOptions(value: object): value is ImageTransformOptions {
@@ -231,14 +236,35 @@ export function useFileStorage() {
    * A time-limited link to a file, served by the module's file route
    * (`/_ablage/file/...`) without any route of your own. Signed with a key
    * derived from Nuxt's `appSecret` (set `NUXT_APP_SECRET`, ≥ 32 characters).
+   *
+   * When the provider can presign reads (S3 with `publicEndpoint`), the link
+   * points at the store instead, so the bytes never pass through the app.
+   * Pass the `FileObject` rather than a bare ref to skip a metadata lookup.
    */
   async function signedUrl(
     ref: FileRef,
     options: { expiresIn?: number; download?: boolean } = {},
   ): Promise<string> {
     const normalized = normalizeRef(ref);
-    const expires = Math.floor(Date.now() / 1000) + Math.max(1, Math.floor(options.expiresIn ?? 3600));
+    const expiresIn = Math.max(1, Math.floor(options.expiresIn ?? 3600));
+    const expires = Math.floor(Date.now() / 1000) + expiresIn;
     const download = !!options.download;
+
+    if (provider.presignRead) {
+      const object = isFileObject(ref) ? ref : await provider.head(normalized);
+      // A missing file falls through to a route link, which 404s like on other providers.
+      if (object) {
+        return provider.presignRead(normalized, {
+          expiresIn,
+          responseHeaders: {
+            'content-type': object.contentType,
+            'content-disposition': contentDisposition(download ? 'attachment' : 'inline', object.name ?? object.id),
+            'cache-control': `private, max-age=${expiresIn}`,
+          },
+        });
+      }
+    }
+
     const sig = await signFileClaims(await deriveSecret(SIGNING_PURPOSE), { ...normalized, expires, download });
     const query = new URLSearchParams({ expires: String(expires), sig });
     if (download) query.set('download', '1');

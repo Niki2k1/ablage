@@ -28,7 +28,7 @@ export interface RequestLike {
 const DEFAULT_MAX_AGE = 60 * 60 * 24 * 365; // 1 year, matching the image route.
 
 /** RFC 6266 `content-disposition` value with an ASCII fallback + UTF-8 form. */
-function contentDisposition(type: string, name: string): string {
+export function contentDisposition(type: string, name: string): string {
   // Strip anything outside printable ASCII (plus quote/backslash) for the
   // legacy `filename=`; the `filename*=` form carries the real UTF-8 name.
   const asciiName = name.replace(/[^\x20-\x7E]|["\\]/g, '_');
