@@ -12,7 +12,7 @@ import {
 
 const imgproxy: ImageServiceConfig = {
   service: 'imgproxy',
-  route: '/_filer-ipx',
+  route: '/_ablage/image',
   baseURL: 'https://img.example.com',
 }
 
@@ -60,7 +60,7 @@ describe('imageServiceURL', () => {
   const source = sourceURL(imgproxy, 'http://app:3000/', 'organization:5/logos', 'a b')
 
   it('points the source at the module route, encoding each segment', () => {
-    expect(source).toBe('http://app:3000/_filer-ipx/_/organization%3A5/logos/a%20b')
+    expect(source).toBe('http://app:3000/_ablage/image/_/organization%3A5/logos/a%20b')
   })
 
   it('builds unsigned imgproxy URLs without a key', async () => {

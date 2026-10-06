@@ -1,7 +1,7 @@
 import type { ProviderGetImage } from '@nuxt/image';
 import { joinURL } from 'ufo';
 
-interface FilerProviderOptions {
+interface AblageImageProviderOptions {
   baseURL?: string;
 }
 
@@ -34,7 +34,7 @@ const operationsGenerator = (
 
 export const getImage: ProviderGetImage = (
   src: string,
-  { modifiers = {}, baseURL = '/_filer-ipx' }: { modifiers?: Record<string, unknown>; baseURL?: string } = {},
+  { modifiers = {}, baseURL = '/_ablage/image' }: { modifiers?: Record<string, unknown>; baseURL?: string } = {},
 ) => {
   const ops = operationsGenerator(
     modifiers as Record<string, string | number | boolean | undefined>
@@ -48,4 +48,4 @@ export default () => ({
   supportsAlias: false,
 });
 
-export type { FilerProviderOptions };
+export type { AblageImageProviderOptions };

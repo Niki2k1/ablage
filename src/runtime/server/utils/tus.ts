@@ -1,5 +1,3 @@
-import { createError } from 'h3';
-import { defu } from 'defu';
 import { consola } from 'consola';
 import {
   Server,
@@ -9,9 +7,10 @@ import {
 } from '@tus/server';
 import { FileStore } from '@tus/file-store';
 // @ts-expect-error virtual module injected by the module
-import { tusRoute, tusStagingDir, tusMaxSize, tusExpiration } from '#nuxt-filer-tus';
-import type { FileMeta, TusPromoteOptions } from '../../../runtime/types';
+import { tusRoute, tusStagingDir, tusMaxSize, tusExpiration } from '#ablage-tus';
+import type { FileObject, TusPromoteOptions } from '../../../runtime/types';
 import { useFileStorage } from './storage';
+import { httpError } from './objects';
 
 export type { TusPromoteOptions };
 
@@ -37,7 +36,7 @@ let expirationTimer: ReturnType<typeof setInterval> | undefined;
 export function setTusServerOptions(options: TusServerUserOptions) {
   if (server) {
     consola.warn(
-      'nuxt-filer: setTusServerOptions() called after the tus server was created — the options are ignored. Call it from a Nitro plugin instead.'
+      'ablage: setTusServerOptions() called after the tus server was created — the options are ignored. Call it from a Nitro plugin instead.'
     );
     return;
   }
@@ -113,7 +112,7 @@ export function useTusStaging() {
     const readable = store as Partial<Pick<FileStore, 'read'>>;
     if (typeof readable.read !== 'function') {
       throw new TypeError(
-        'nuxt-filer: the configured tus datastore does not support read() — useTusStaging() requires a FileStore-compatible datastore'
+        'ablage: the configured tus datastore does not support read() — useTusStaging() requires a FileStore-compatible datastore'
       );
     }
     try {
@@ -139,53 +138,40 @@ export function useTusStaging() {
 
   /**
    * Move a completed staged upload into the file storage and (by default)
-   * delete the staged copy. Returns the stored file's id and resolved meta.
+   * delete the staged copy. Returns the stored file. `name` and `contentType`
+   * fall back to the upload's tus metadata (`filename`, `filetype`).
    */
   async function promote(
     tusId: string,
-    groupId: string,
+    group: string,
     options: TusPromoteOptions = {}
-  ): Promise<{ id: string; meta: FileMeta }> {
+  ): Promise<FileObject> {
     const upload = await info(tusId);
     if (!upload) {
-      throw createError({
-        statusCode: 404,
-        statusMessage: `No staged tus upload found for id: ${tusId}`,
-      });
+      throw httpError(404, `No staged tus upload found for id: ${tusId}`);
     }
     if (typeof upload.size === 'number' && upload.offset !== upload.size) {
-      throw createError({
-        statusCode: 409,
-        statusMessage: `Staged tus upload is incomplete: ${tusId} (${upload.offset}/${upload.size} bytes)`,
-      });
+      throw httpError(409, `Staged tus upload is incomplete: ${tusId} (${upload.offset}/${upload.size} bytes)`);
     }
 
     const data = await read(tusId);
     if (!data) {
-      throw createError({
-        statusCode: 404,
-        statusMessage: `Staged tus upload data is missing for id: ${tusId}`,
-      });
+      throw httpError(404, `Staged tus upload data is missing for id: ${tusId}`);
     }
 
     const tusMeta = upload.metadata ?? {};
-    const meta = defu(options.meta ?? {}, {
-      name: tusMeta.filename ?? tusId,
-      mime: tusMeta.filetype ?? 'application/octet-stream',
-      type: '',
-      version: 1,
-    }) as FileMeta;
-
-    const id = await useFileStorage().upload(groupId, data, {
-      meta,
-      transform: options.transform,
+    const { removeStaged, ...putOptions } = options;
+    const file = await useFileStorage().put(group, data, {
+      ...putOptions,
+      name: options.name ?? tusMeta.filename ?? undefined,
+      contentType: options.contentType ?? tusMeta.filetype ?? undefined,
     });
 
-    if (options.removeStaged !== false) {
+    if (removeStaged !== false) {
       await remove(tusId);
     }
 
-    return { id, meta };
+    return file;
   }
 
   return { info, read, remove, promote };

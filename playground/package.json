@@ -1,6 +1,6 @@
 {
   "private": true,
-  "name": "nuxt-filer-playground",
+  "name": "ablage-playground",
   "type": "module",
   "scripts": {
     "dev": "nuxi dev",

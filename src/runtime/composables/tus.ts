@@ -16,9 +16,9 @@ export function useTusUpload(options: UseTusUploadOptions = {}) {
   const runtimeConfig = useRuntimeConfig();
   const endpoint =
     options.endpoint
-    ?? (runtimeConfig.public.filer as { tusRoute?: string } | undefined)
+    ?? (runtimeConfig.public.ablage as { tusRoute?: string } | undefined)
       ?.tusRoute
-    ?? '/_filer-tus';
+    ?? '/_ablage/tus';
 
   const items = reactive<Record<string, TusUploadState>>({});
   // tus Upload instances hold DOM/file handles — keep them out of reactivity.

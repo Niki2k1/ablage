@@ -18,7 +18,7 @@ describe('local IPX image route', async () => {
 
   it('resizes and converts a stored image', async () => {
     const { id } = await upload('gallery')
-    const res = await fetch(`/_filer-ipx/w_50,f_webp/gallery/${id}`)
+    const res = await fetch(`/_ablage/image/w_50,f_webp/gallery/${id}`)
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toBe('image/webp')
     const meta = await sharp(Buffer.from(await res.arrayBuffer())).metadata()
@@ -27,7 +27,7 @@ describe('local IPX image route', async () => {
 
   it('serves the original with `_` modifiers', async () => {
     const { id } = await upload('gallery')
-    const res = await fetch(`/_filer-ipx/_/gallery/${id}`)
+    const res = await fetch(`/_ablage/image/_/gallery/${id}`)
     expect(res.status).toBe(200)
     const meta = await sharp(Buffer.from(await res.arrayBuffer())).metadata()
     expect(meta).toMatchObject({ format: 'png', width: 200, height: 100 })
@@ -35,23 +35,23 @@ describe('local IPX image route', async () => {
 
   it('handles group ids containing ":" and "/"', async () => {
     const { id } = await upload('organization:5/logos')
-    const res = await fetch(`/_filer-ipx/s_20x20/organization:5/logos/${id}`)
+    const res = await fetch(`/_ablage/image/s_20x20/organization:5/logos/${id}`)
     expect(res.status).toBe(200)
     const meta = await sharp(Buffer.from(await res.arrayBuffer())).metadata()
     expect(meta).toMatchObject({ width: 20, height: 20 })
   })
 
   it('answers 404 for unknown files', async () => {
-    const res = await fetch('/_filer-ipx/w_50/gallery/does-not-exist')
+    const res = await fetch('/_ablage/image/w_50/gallery/does-not-exist')
     expect(res.status).toBe(404)
   })
 
   it('revalidates with if-modified-since', async () => {
     const { id } = await upload('gallery')
-    const first = await fetch(`/_filer-ipx/w_50/gallery/${id}`)
+    const first = await fetch(`/_ablage/image/w_50/gallery/${id}`)
     const lastModified = first.headers.get('last-modified')
     expect(lastModified).toBeTruthy()
-    const second = await fetch(`/_filer-ipx/w_50/gallery/${id}`, { headers: { 'if-modified-since': lastModified! } })
+    const second = await fetch(`/_ablage/image/w_50/gallery/${id}`, { headers: { 'if-modified-since': lastModified! } })
     expect(second.status).toBe(304)
   })
 })

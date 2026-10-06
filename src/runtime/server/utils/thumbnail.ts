@@ -57,7 +57,7 @@ async function renderPdfPage(data: Uint8Array, page: number, width: number): Pro
  *
  * ```ts
  * const thumb = await generateThumbnail(file.data, file.type, { width: 300, height: 200 })
- * if (thumb) await storage.upload(group, thumb.data, { meta: { ...meta, mime: thumb.mime } })
+ * if (thumb) await storage.put(group, thumb.data, { contentType: thumb.mime, name: `thumb_${file.name}` })
  * ```
  */
 export async function generateThumbnail(
@@ -85,8 +85,8 @@ export async function generateThumbnail(
       warnOnce(
         type,
         type === 'application/pdf'
-          ? '[nuxt-filer] generateThumbnail: PDF previews need the optional dependencies `unpdf`, `@napi-rs/canvas` and `sharp`.'
-          : '[nuxt-filer] generateThumbnail: image previews need the optional dependency `sharp`.',
+          ? '[ablage] generateThumbnail: PDF previews need the optional dependencies `unpdf`, `@napi-rs/canvas` and `sharp`.'
+          : '[ablage] generateThumbnail: image previews need the optional dependency `sharp`.',
       );
     }
     return null;

@@ -1,95 +1,76 @@
-import {
-  defineEventHandler,
-  sendWebResponse,
-  toWebRequest,
-  useBase,
-  type EventHandler,
-} from 'h3';
+import { defineEventHandler, getRequestURL } from 'nuxt/server';
 // Namespace import: ipx 3 and 4 export different handler factories, and a named
 // import of one that doesn't exist fails at module link time (crashing the
 // server at boot) instead of letting us feature-detect.
 import * as ipxModule from 'ipx';
 import type { IPXStorage } from 'ipx';
 // @ts-expect-error virtual module injected by the module
-import { ipxRoute } from '#nuxt-filer-image';
-import { headStoredFile, useFileStorageProvider } from '../provider';
+import { ipxRoute } from '#ablage-image';
+import type { FileRef } from '../../../runtime/types';
+import { useFileStorageProvider } from '../provider';
+import { normalizeRef, streamToBytes } from '../utils/objects';
 
 /**
- * Maps an IPX `id` (the path after the modifiers segment) to a `(groupId, fileId)`
- * pair as used by the file storage provider. Ids are expected as
- * `groupId/fileId` — additional `/` characters in the group id are preserved.
+ * Maps an IPX `id` (the path after the modifiers segment, `group/id`) to a
+ * file ref; additional `/` characters belong to the group. `null` when the
+ * path isn't a valid ref.
  */
-function parseId(id: string): [string, string] | null {
+function parseId(id: string): FileRef | null {
   const trimmed = id.replace(/^\/+/, '');
   const lastSlash = trimmed.lastIndexOf('/');
   if (lastSlash <= 0 || lastSlash === trimmed.length - 1) return null;
-  return [trimmed.slice(0, lastSlash), trimmed.slice(lastSlash + 1)];
+  try {
+    return normalizeRef({ group: trimmed.slice(0, lastSlash), id: trimmed.slice(lastSlash + 1) });
+  }
+  catch {
+    return null;
+  }
 }
 
-const filerStorage: IPXStorage = {
-  name: 'nuxt-filer',
+const ablageStorage: IPXStorage = {
+  name: 'ablage',
   async getMeta(id) {
-    const parsed = parseId(id);
-    if (!parsed) return undefined;
-    const [groupId, fileId] = parsed;
+    const ref = parseId(id);
+    if (!ref) return undefined;
     // Metadata only; IPX reads the bytes through getData() when it renders.
-    const file = await headStoredFile(useFileStorageProvider(), groupId, fileId);
+    const file = await useFileStorageProvider().head(ref).catch(() => null);
     if (!file) return undefined;
-    const mtime = file.updatedAt ?? file.createdAt ?? new Date();
     return {
       // HTTP dates have second precision; without truncating, the
       // `if-modified-since` echo is always "older" than mtime and never 304s.
-      mtime: new Date(Math.floor(mtime.getTime() / 1000) * 1000),
+      mtime: new Date(Math.floor(file.updatedAt.getTime() / 1000) * 1000),
       maxAge: 60 * 60 * 24 * 365,
     };
   },
   async getData(id) {
-    const parsed = parseId(id);
-    if (!parsed) return undefined;
-    const [groupId, fileId] = parsed;
-    const data = await useFileStorageProvider().getData(groupId, fileId);
-    if (!data) return undefined;
-    // IPX accepts ArrayBuffer | Buffer; pass the buffer view directly.
-    return data as unknown as ArrayBuffer;
+    const ref = parseId(id);
+    if (!ref) return undefined;
+    const body = await useFileStorageProvider().read(ref).catch(() => null);
+    if (!body) return undefined;
+    // IPX accepts ArrayBuffer | Buffer.
+    return Buffer.from(await streamToBytes(body));
   },
 };
 
-type IPX4 = {
-  createIPXFetchHandler: (
-    ipx: ReturnType<typeof ipxModule.createIPX>,
-    opts?: { parseURL?: (url: string) => unknown },
-  ) => (request: Request) => Response | Promise<Response>;
-  parseIPXURL: (url: string) => unknown;
-};
-type IPX3 = {
-  createIPXH3Handler: (ipx: ReturnType<typeof ipxModule.createIPX>) => EventHandler;
-};
+type FetchHandler = (request: Request) => Response | Promise<Response>;
 
-function createHandler(): EventHandler {
-  const ipx = ipxModule.createIPX({ storage: filerStorage });
-  const ipx4 = ipxModule as unknown as Partial<IPX4>;
-
-  if (ipx4.createIPXFetchHandler && ipx4.parseIPXURL) {
-    // ipx 4: a fetch handler. Strip the route prefix from the URL it parses so
-    // it sees `/<modifiers>/<groupId>/<fileId>`.
-    const { parseIPXURL } = ipx4;
-    const fetchHandler = ipx4.createIPXFetchHandler(ipx, {
-      parseURL(url) {
-        const parsed = new URL(url);
-        parsed.pathname = parsed.pathname.slice(ipxRoute.length) || '/';
-        return parseIPXURL(parsed.href);
-      },
-    });
-    return defineEventHandler(async (event) =>
-      sendWebResponse(event, await fetchHandler(toWebRequest(event))),
-    );
-  }
-
-  // ipx 3: an h3 handler. `useBase` rewrites the path for the inner handler
-  // (assigning `event.path` throws — it's a getter-only accessor).
-  return useBase(ipxRoute, (ipxModule as unknown as IPX3).createIPXH3Handler(ipx));
+/** ipx 4: `createIPXFetchHandler`; ipx 3: `createIPXWebServer`. Both take `/<modifiers>/<id>` requests. */
+function createHandler(): FetchHandler {
+  const ipx = ipxModule.createIPX({ storage: ablageStorage });
+  const factories = ipxModule as unknown as {
+    createIPXFetchHandler?: (ipx: unknown) => FetchHandler;
+    createIPXWebServer?: (ipx: unknown) => FetchHandler;
+  };
+  const factory = factories.createIPXFetchHandler ?? factories.createIPXWebServer;
+  if (!factory) throw new Error('[ablage] unsupported ipx version (expected ipx 3 or 4)');
+  return factory(ipx);
 }
 
-let _handler: EventHandler | null = null;
+let _handler: FetchHandler | undefined;
 
-export default defineEventHandler((event) => (_handler ??= createHandler())(event));
+export default defineEventHandler((event) => {
+  // IPX expects `/<modifiers>/<group>/<id>`; strip the route prefix.
+  const url = getRequestURL(event);
+  url.pathname = url.pathname.slice(ipxRoute.length) || '/';
+  return (_handler ??= createHandler())(new Request(url, { method: event.req.method, headers: event.req.headers }));
+});

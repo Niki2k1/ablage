@@ -26,7 +26,7 @@ import { dirname, join, resolve } from 'node:path';
  */
 
 const PATH_TRAVERSE_RE = /\.\.:|\.\.$/;
-const DRIVER_NAME = 'nuxt-filer-fs';
+const DRIVER_NAME = 'ablage-fs';
 
 export interface FsDriverOptions {
   /** Filesystem path used as the base for all keys. Required. */
@@ -40,7 +40,7 @@ export interface FsDriverOptions {
 }
 
 function driverError(message: string): Error {
-  return new Error(`[nuxt-filer] [${DRIVER_NAME}] ${message}`);
+  return new Error(`[ablage] [${DRIVER_NAME}] ${message}`);
 }
 
 function ignoreNotfound<T>(err: NodeJS.ErrnoException): T | null {

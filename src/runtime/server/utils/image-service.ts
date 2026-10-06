@@ -5,7 +5,7 @@ export type ImageModifiers = Record<string, string>;
 
 export interface ImageServiceConfig {
   service: 'imgproxy' | 'ipx';
-  /** The module's image route (`filer.image.route`), which serves originals at `<route>/_/…`. */
+  /** The module's image route (`ablage.image.route`), which serves originals at `<route>/_/…`. */
   route: string;
   /** Base URL of the image service. */
   baseURL: string;
@@ -32,7 +32,7 @@ export function parseModifiers(segment: string): ImageModifiers {
   return modifiers;
 }
 
-function stringifyModifiers(modifiers: ImageModifiers): string {
+export function stringifyModifiers(modifiers: ImageModifiers): string {
   const parts = Object.entries(modifiers).map(([key, value]) =>
     value === '' ? key : `${key}_${encodeURIComponent(value)}`,
   );

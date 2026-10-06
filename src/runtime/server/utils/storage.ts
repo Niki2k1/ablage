@@ -1,179 +1,249 @@
-import { defu } from 'defu';
 import type {
-  FileMeta,
-  StoredFile,
-  ExternalRef,
-  FileStorageProvider,
   ImageTransformOptions,
-  ImageTransformResult,
+  CustomMetadata,
+  FileBody,
+  FileMetaPatch,
+  FileObject,
+  FileRef,
+  GetOptions,
+  ListOptions,
+  ListResult,
+  PutBody,
+  PutOptions,
 } from '../../../runtime/types';
-import { headStoredFile, useFileStorageProvider } from '../provider';
+import { deriveSecret } from 'nuxt/server';
+// @ts-expect-error virtual module injected by the module
+import { fileRoute, imageRouteEnabled, ipxRoute } from '#ablage-image';
+import { useFileStorageProvider } from '../provider';
+import { stringifyModifiers, transformToModifiers, type ImageModifiers } from './image-service';
+import { refPath, signFileClaims } from './signing';
 import { transformImage } from './image';
 import { transformWithService, useImageService } from './image-service-runtime';
+import {
+  assertId,
+  bodyToBytes,
+  clampRange,
+  computeEtag,
+  httpError,
+  normalizeGroup,
+  normalizeRef,
+  toFileBody,
+} from './objects';
 
 export type {
-  FileMeta,
-  StoredFile,
-  ExternalRef,
-  FileStorageProvider,
-  ImageTransformOptions,
-  ImageTransformResult,
+  CustomMetadata,
+  FileBody,
+  FileMetaPatch,
+  FileObject,
+  FileRef,
+  GetOptions,
+  ListOptions,
+  ListResult,
+  PutBody,
+  PutOptions,
 };
 
-export const useFileStorage = () => {
+const DEFAULT_LIST_LIMIT = 1000;
+
+/** `deriveSecret()` purpose for signed file URLs; the file route verifies with the same key. */
+export const SIGNING_PURPOSE = 'ablage:signed-url';
+
+const TRANSFORM_KEYS = new Set(['width', 'height', 'fit', 'withoutEnlargement', 'format', 'quality', 'animated', 'background']);
+function isTransformOptions(value: object): value is ImageTransformOptions {
+  return Object.keys(value).some((key) => TRANSFORM_KEYS.has(key));
+}
+
+/**
+ * Server-side file storage API, backed by the registered provider.
+ *
+ * ```ts
+ * const storage = useFileStorage()
+ * const file = await storage.put('avatars', data, { contentType: 'image/png', customMetadata: { userId } })
+ * const head = await storage.head(file)        // metadata only
+ * const body = await storage.get(file)         // + body stream / bytes()
+ * ```
+ */
+export function useFileStorage() {
   const provider = useFileStorageProvider();
 
-  async function upload(
-    groupId: string,
-    data: Buffer | Uint8Array,
-    options: { meta?: FileMeta; transform?: ImageTransformOptions } = {}
-  ): Promise<string> {
-    let payload = data;
+  /** A file's metadata without reading its bytes, or `null`. */
+  async function head<M extends CustomMetadata = CustomMetadata>(ref: FileRef): Promise<FileObject<M> | null> {
+    return (await provider.head(normalizeRef(ref))) as FileObject<M> | null;
+  }
 
-    // Optional upload-time image processing, via the configured image service
-    // or locally with the `sharp` peer dep. The stored bytes and the
-    // metadata's mime/dimensions reflect the result.
+  /** A file with its body (optionally a byte range), or `null`. */
+  async function get<M extends CustomMetadata = CustomMetadata>(
+    ref: FileRef,
+    options: GetOptions = {},
+  ): Promise<FileBody<M> | null> {
+    const normalized = normalizeRef(ref);
+    const [object, body] = await Promise.all([
+      provider.head(normalized),
+      provider.read(normalized, options.range),
+    ]);
+    if (!object || !body) {
+      await body?.cancel();
+      return null;
+    }
+    const range = options.range ? clampRange(object.size, options.range) : undefined;
+    return toFileBody(object, body, range) as FileBody<M>;
+  }
+
+  /** Store a file in `group` and return its metadata. */
+  async function put<M extends CustomMetadata = CustomMetadata>(
+    group: string,
+    body: PutBody,
+    options: PutOptions<M> = {},
+  ): Promise<FileObject<M>> {
+    const ref = { group: normalizeGroup(group), id: options.id ?? crypto.randomUUID() };
+    assertId(ref.id);
+
+    if (options.id !== undefined && (!options.overwrite || options.ifMatch !== undefined)) {
+      const existing = await provider.head(ref);
+      if (options.ifMatch !== undefined) {
+        if (existing?.etag !== options.ifMatch) {
+          throw httpError(412, `File "${ref.group}/${ref.id}" does not match the expected etag`);
+        }
+      }
+      else if (existing) {
+        throw httpError(409, `File "${ref.group}/${ref.id}" already exists (pass overwrite: true to replace it)`);
+      }
+    }
+
+    let data = await bodyToBytes(body);
+    let contentType = options.contentType;
+    let width: number | undefined;
+    let height: number | undefined;
+
     if (options.transform) {
       const service = useImageService();
       const result = service
-        ? await transformWithService(service, data, options.transform, options.meta)
+        ? await transformWithService(service, data, options.transform, contentType)
         : await transformImage(data, options.transform);
-      payload = result.data;
-      if (options.meta) {
-        options.meta.mime = result.mime;
-        options.meta.width = result.width;
-        options.meta.height = result.height;
-      }
+      data = result.data;
+      contentType = result.mime;
+      width = result.width;
+      height = result.height;
     }
 
-    const { id } = await provider.create(groupId, payload, options.meta);
-    return id;
+    const now = new Date();
+    const object: FileObject<M> = {
+      ...ref,
+      size: data.length,
+      contentType: contentType || 'application/octet-stream',
+      etag: await computeEtag(data),
+      uploadedAt: now,
+      updatedAt: now,
+      ...(options.name !== undefined ? { name: options.name } : {}),
+      ...(options.cacheControl !== undefined ? { cacheControl: options.cacheControl } : {}),
+      ...(width !== undefined ? { width } : {}),
+      ...(height !== undefined ? { height } : {}),
+      customMetadata: options.customMetadata ?? ({} as M),
+    };
+    await provider.write(object, data);
+    return object;
   }
 
-  async function list(groupId: string): Promise<StoredFile[]> {
-    return await provider.list(groupId);
+  /** Change a file's metadata; `customMetadata` is merged shallowly. Throws 404 if missing. */
+  async function updateMeta<M extends CustomMetadata = CustomMetadata>(
+    ref: FileRef,
+    patch: FileMetaPatch,
+  ): Promise<FileObject<M>> {
+    const normalized = normalizeRef(ref);
+    const updated = await provider.updateMeta(normalized, patch);
+    if (!updated) {
+      throw httpError(404, `File "${normalized.group}/${normalized.id}" not found`);
+    }
+    return updated as FileObject<M>;
   }
 
-  async function get(
-    groupId: string,
-    id: string
-  ): Promise<StoredFile | null> {
-    return await provider.get(groupId, id);
+  /** Delete one or more files; missing files are ignored. */
+  async function remove(refs: FileRef | FileRef[]): Promise<void> {
+    const list = (Array.isArray(refs) ? refs : [refs]).map(normalizeRef);
+    if (list.length) await provider.remove(list);
   }
 
-  /** Like {@link get} but without the bytes, when the provider supports it. */
-  async function head(
-    groupId: string,
-    id: string
-  ): Promise<StoredFile | null> {
-    const file = await headStoredFile(provider, groupId, id);
-    return file && { ...file, data: undefined };
+  /** A page of a group's files, ordered by id. */
+  async function list<M extends CustomMetadata = CustomMetadata>(
+    group: string,
+    options: ListOptions = {},
+  ): Promise<ListResult<M>> {
+    const limit = Math.max(1, Math.floor(options.limit ?? DEFAULT_LIST_LIMIT));
+    return (await provider.list(normalizeGroup(group), { ...options, limit })) as ListResult<M>;
   }
 
-  async function getData(
-    groupId: string,
-    id: string
-  ): Promise<Buffer | null> {
-    return await provider.getData(groupId, id);
+  /** Every file of a group, fetched page by page. */
+  async function* listAll<M extends CustomMetadata = CustomMetadata>(
+    group: string,
+    options: Omit<ListOptions, 'cursor'> = {},
+  ): AsyncGenerator<FileObject<M>> {
+    let cursor: string | undefined;
+    do {
+      const page = await list<M>(group, { ...options, cursor });
+      yield* page.objects;
+      cursor = page.hasMore ? page.cursor : undefined;
+    } while (cursor);
   }
 
-  async function getMeta(id: string): Promise<FileMeta | null> {
-    return await provider.getMeta(id);
+  /** Delete every file in a group. */
+  async function clear(group: string): Promise<void> {
+    for (;;) {
+      const page = await list(group, { limit: DEFAULT_LIST_LIMIT });
+      if (!page.objects.length) return;
+      await provider.remove(page.objects.map(({ group, id }) => ({ group, id })));
+      if (!page.hasMore) return;
+    }
   }
 
-  async function updateMeta(id: string, meta: Partial<FileMeta>) {
-    const existing = await provider.getMeta(id);
-    const merged = defu(meta, existing) as Partial<FileMeta>;
-    await provider.update(id, merged);
-  }
-
-  async function remove(groupId: string, id: string) {
-    await provider.remove(groupId, id);
-  }
-
-  async function clear(groupId: string) {
-    await provider.clear(groupId);
-  }
-
-  async function has(groupId: string, id: string): Promise<boolean> {
-    return await provider.has(groupId, id);
-  }
-
-  async function findByMeta(
+  /**
+   * The first file whose `customMetadata[key] === value`, optionally within a
+   * group. Throws when the provider doesn't support metadata lookups.
+   */
+  async function findByMeta<M extends CustomMetadata = CustomMetadata>(
     key: string,
     value: unknown,
-    groupId?: string
-  ): Promise<StoredFile | null> {
-    return await provider.findByMeta({ key, value, groupId });
-  }
-
-  async function checkDuplicate(
-    groupId: string,
-    key: string,
-    value: unknown
-  ): Promise<boolean> {
-    const file = await provider.findByMeta({ key, value, groupId });
-    return !!file;
-  }
-
-  /**
-   * Get the latest version of each file (by name) within a group.
-   */
-  async function getLatestVersions(groupId: string): Promise<StoredFile[]> {
-    const files = await list(groupId);
-    const fileMap = new Map<string, StoredFile>();
-
-    for (const file of files) {
-      const existing = fileMap.get(file.meta.name);
-      const version = file.meta.version ?? 0;
-      const existingVersion = existing?.meta.version ?? 0;
-
-      if (!existing || version > existingVersion) {
-        fileMap.set(file.meta.name, file);
-      }
+    group?: string,
+  ): Promise<FileObject<M> | null> {
+    if (!provider.findByMeta) {
+      throw new Error('[ablage] the configured storage provider does not support findByMeta()');
     }
-
-    return Array.from(fileMap.values());
+    return (await provider.findByMeta({ key, value, group: group && normalizeGroup(group) })) as FileObject<M> | null;
   }
 
   /**
-   * Determine the next version number for a file name.
+   * Path of a file on the image route: `/_ablage/image/<modifiers>/<group>/<id>`.
+   * Without `transform` it serves the original. The route is public, like
+   * `<NuxtImg provider="ablage">`; use {@link signedUrl} for private files.
    */
-  function getNextVersionNumber(files: StoredFile[], name: string): number {
-    const matching = files
-      .filter((f) => f.meta.name === name)
-      .sort((a, b) => a.meta.version - b.meta.version);
-
-    const newest = matching[matching.length - 1];
-    if (!newest) return 1;
-
-    return newest.meta.version + 1;
+  function url(ref: FileRef, options: { transform?: ImageTransformOptions | ImageModifiers } = {}): string {
+    if (!imageRouteEnabled) {
+      throw new Error('[ablage] url() needs the image route; enable `ablage.image` (with @nuxt/image, `enabled: \'force\'`, or an image service)');
+    }
+    const normalized = normalizeRef(ref);
+    const { transform } = options;
+    const modifiers = !transform
+      ? {}
+      : isTransformOptions(transform) ? transformToModifiers(transform) : transform;
+    return `${ipxRoute}/${stringifyModifiers(modifiers)}/${refPath(normalized)}`;
   }
 
-  // External file operations (only available if provider supports it)
-  const external = provider.external
-    ? {
-        sync: provider.external.sync.bind(provider.external),
-        push: provider.external.push.bind(provider.external),
-        pull: provider.external.pull.bind(provider.external),
-      }
-    : undefined;
+  /**
+   * A time-limited link to a file, served by the module's file route
+   * (`/_ablage/file/...`) without any route of your own. Signed with a key
+   * derived from Nuxt's `appSecret` (set `NUXT_APP_SECRET`, ≥ 32 characters).
+   */
+  async function signedUrl(
+    ref: FileRef,
+    options: { expiresIn?: number; download?: boolean } = {},
+  ): Promise<string> {
+    const normalized = normalizeRef(ref);
+    const expires = Math.floor(Date.now() / 1000) + Math.max(1, Math.floor(options.expiresIn ?? 3600));
+    const download = !!options.download;
+    const sig = await signFileClaims(await deriveSecret(SIGNING_PURPOSE), { ...normalized, expires, download });
+    const query = new URLSearchParams({ expires: String(expires), sig });
+    if (download) query.set('download', '1');
+    return `${fileRoute}/${refPath(normalized)}?${query}`;
+  }
 
-  return {
-    upload,
-    list,
-    get,
-    head,
-    getData,
-    getMeta,
-    updateMeta,
-    remove,
-    clear,
-    has,
-    findByMeta,
-    checkDuplicate,
-    getLatestVersions,
-    getNextVersionNumber,
-    external,
-  };
-};
+  return { head, get, put, updateMeta, remove, list, listAll, clear, findByMeta, url, signedUrl };
+}

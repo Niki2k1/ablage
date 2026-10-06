@@ -17,10 +17,10 @@ const port = 3999
 describe.skipIf(!imgproxyURL)(`image service: ${service}`, async () => {
   process.env.FILER_TEST_IMAGE_SERVICE = service
   await rm(fileURLToPath(new URL('../.data/test-image-service', import.meta.url)), { recursive: true, force: true })
-  process.env.NUXT_FILER_IMAGE_BASE_URL = imgproxyURL
-  process.env.NUXT_FILER_IMAGE_KEY = process.env.IMGPROXY_KEY ?? ''
-  process.env.NUXT_FILER_IMAGE_SALT = process.env.IMGPROXY_SALT ?? ''
-  process.env.NUXT_FILER_IMAGE_SOURCE_URL = `http://127.0.0.1:${port}`
+  process.env.NUXT_ABLAGE_IMAGE_BASE_URL = imgproxyURL
+  process.env.NUXT_ABLAGE_IMAGE_KEY = process.env.IMGPROXY_KEY ?? ''
+  process.env.NUXT_ABLAGE_IMAGE_SALT = process.env.IMGPROXY_SALT ?? ''
+  process.env.NUXT_ABLAGE_IMAGE_SOURCE_URL = `http://127.0.0.1:${port}`
 
   await setup({
     rootDir: fileURLToPath(new URL('./fixtures/image-service', import.meta.url)),
@@ -32,30 +32,31 @@ describe.skipIf(!imgproxyURL)(`image service: ${service}`, async () => {
   }).png().toBuffer()
 
   it('transforms at upload time through the service and cleans up the staged original', async () => {
-    const result = await $fetch<{ meta: { mime: string, width: number, height: number }, staged: unknown[] }>('/api/upload', {
+    const result = await $fetch<{ file: { contentType: string, width: number, height: number }, staged: unknown[] }>('/api/upload', {
       method: 'POST',
       body: {
-        groupId: 'organization:5',
+        group: 'organization:5',
         content: png.toString('base64'),
-        meta: { name: 'logo.png', mime: 'image/png', type: 'image', version: 1 },
+        contentType: 'image/png',
+        name: 'logo.png',
         transform: { width: 64, format: 'webp' },
       },
     })
-    expect(result.meta).toMatchObject({ mime: 'image/webp', width: 64, height: 32 })
+    expect(result.file).toMatchObject({ contentType: 'image/webp', width: 64, height: 32 })
     expect(result.staged).toEqual([])
   })
 
   it('serves originals on `_` and redirects variants to a working service URL', async () => {
-    const { id } = await $fetch<{ id: string }>('/api/upload', {
+    const { file: { id } } = await $fetch<{ file: { id: string } }>('/api/upload', {
       method: 'POST',
-      body: { groupId: 'organization:5', content: png.toString('base64'), meta: { name: 'logo.png', mime: 'image/png', type: 'image', version: 1 } },
+      body: { group: 'organization:5', content: png.toString('base64'), contentType: 'image/png', name: 'logo.png' },
     })
 
-    const original = await fetch(`/_filer-ipx/_/organization:5/${id}`)
+    const original = await fetch(`/_ablage/image/_/organization:5/${id}`)
     expect(original.headers.get('content-type')).toBe('image/png')
     expect(Buffer.from(await original.arrayBuffer()).equals(png)).toBe(true)
 
-    const redirect = await fetch(`/_filer-ipx/s_100x100,f_webp/organization:5/${id}`, { redirect: 'manual' })
+    const redirect = await fetch(`/_ablage/image/s_100x100,f_webp/organization:5/${id}`, { redirect: 'manual' })
     expect(redirect.status).toBe(302)
     const location = redirect.headers.get('location')!
     expect(location.startsWith(`${imgproxyURL}/`)).toBe(true)

@@ -27,7 +27,7 @@ async function loadSharp(): Promise<SharpModule> {
   }
   catch {
     throw new Error(
-      '[nuxt-filer] Image transforms require the optional peer dependency `sharp`. Install it with `npm i sharp`.'
+      '[ablage] Image transforms require the optional peer dependency `sharp`. Install it with `npm i sharp`.'
     );
   }
   return sharpModule;

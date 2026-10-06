@@ -1,6 +1,6 @@
 export default defineNuxtConfig({
   modules: ['../src/module', '@nuxt/image'],
-  filer: {
+  ablage: {
     storageName: 'documents',
     storagePath: '.data/documents',
     provider: 'unstorage',

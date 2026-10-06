@@ -10,7 +10,7 @@ import {
 import { consola } from 'consola';
 import { defu } from 'defu';
 
-export interface FilerImageOptions {
+export interface AblageImageOptions {
   /**
    * Enable the @nuxt/image provider + IPX route. When `true` (the default),
    * the integration registers only if `@nuxt/image` is also installed; when
@@ -18,9 +18,9 @@ export interface FilerImageOptions {
    * even when `@nuxt/image` cannot be detected (mainly useful for tests).
    */
   enabled?: boolean | 'force';
-  /** Base path for the IPX endpoint. Default: `/_filer-ipx`. */
+  /** Base path for the IPX endpoint. Default: `/_ablage/image`. */
   route?: string;
-  /** Name to register the @nuxt/image provider under. Default: `filer`. */
+  /** Name to register the @nuxt/image provider under. Default: `ablage`. */
   providerName?: string;
   /**
    * Where images are processed. `'local'` (default) runs IPX/sharp in this
@@ -29,24 +29,24 @@ export interface FilerImageOptions {
    * fetched from it — so `sharp`/`ipx` aren't needed here.
    */
   service?: 'local' | 'imgproxy' | 'ipx';
-  /** Base URL of the image service. Runtime override: `NUXT_FILER_IMAGE_BASE_URL`. */
+  /** Base URL of the image service. Runtime override: `NUXT_ABLAGE_IMAGE_BASE_URL`. */
   baseURL?: string;
-  /** imgproxy signing key (hex). Prefer `NUXT_FILER_IMAGE_KEY`. Unsigned URLs when unset. */
+  /** imgproxy signing key (hex). Prefer `NUXT_ABLAGE_IMAGE_KEY`. Unsigned URLs when unset. */
   key?: string;
-  /** imgproxy signing salt (hex). Prefer `NUXT_FILER_IMAGE_SALT`. */
+  /** imgproxy signing salt (hex). Prefer `NUXT_ABLAGE_IMAGE_SALT`. */
   salt?: string;
   /**
    * Origin the service fetches originals from (e.g. `http://app:3000` on a
    * private network). Defaults to the request origin; required for
-   * upload-time transforms. Runtime override: `NUXT_FILER_IMAGE_SOURCE_URL`.
+   * upload-time transforms. Runtime override: `NUXT_ABLAGE_IMAGE_SOURCE_URL`.
    */
   sourceURL?: string;
 }
 
-export interface FilerTusOptions {
+export interface AblageTusOptions {
   /** Enable the tus endpoint + composable. Defaults to `true` when the `tus` option is an object. */
   enabled?: boolean;
-  /** Base route of the tus endpoint. Default: `/_filer-tus`. */
+  /** Base route of the tus endpoint. Default: `/_ablage/tus`. */
   route?: string;
   /** Directory where in-progress uploads are staged. Default: `.data/tus`. */
   stagingDir?: string;
@@ -67,15 +67,19 @@ export interface ModuleOptions {
   /** Provider mode. 'unstorage' uses the built-in unstorage provider. 'custom' expects you to call setFileStorageProvider() in a Nitro plugin. Default: 'unstorage' */
   provider?: 'unstorage' | 'custom';
   /** @nuxt/image integration. Set to `false` to disable, or pass an object to override defaults. */
-  image?: boolean | FilerImageOptions;
+  image?: boolean | AblageImageOptions;
   /** Resumable uploads via the tus protocol. Opt-in: pass `true` or an options object. */
-  tus?: boolean | FilerTusOptions;
+  tus?: boolean | AblageTusOptions;
 }
 
 export default defineNuxtModule<ModuleOptions>({
   meta: {
-    name: 'nuxt-filer',
-    configKey: 'filer',
+    name: 'ablage',
+    configKey: 'ablage',
+    compatibility: {
+      // Server routes build on `nuxt/server`, which ships with Nuxt 4.6.
+      nuxt: '>=4.6.0',
+    },
   },
   defaults: {
     storageName: 'documents',
@@ -135,11 +139,19 @@ export default defineNuxtModule<ModuleOptions>({
         from: resolver.resolve('./runtime/server/providers/unstorage'),
       },
       {
+        name: 'migrateUnstorageMetadata',
+        from: resolver.resolve('./runtime/server/providers/unstorage'),
+      },
+      {
         name: 'createS3Provider',
         from: resolver.resolve('./runtime/server/providers/s3'),
       },
       {
         name: 'createS3Client',
+        from: resolver.resolve('./runtime/server/providers/s3'),
+      },
+      {
+        name: 'migrateS3Metadata',
         from: resolver.resolve('./runtime/server/providers/s3'),
       },
       {
@@ -150,22 +162,29 @@ export default defineNuxtModule<ModuleOptions>({
         name: 'importUnstorageMetadata',
         from: resolver.resolve('./runtime/server/providers/drizzle'),
       },
+      {
+        name: 'migrateDrizzleMetadata',
+        from: resolver.resolve('./runtime/server/providers/drizzle'),
+      },
     ]);
 
     // -------------------------------------------------------
     // Auto-imports: types (available everywhere)
     // -------------------------------------------------------
-    const typesSpecifier = 'nuxt-filer/runtime/types';
+    const typesSpecifier = 'ablage/runtime/types';
     addImports([
-      { name: 'FileMeta', from: typesSpecifier, type: true },
-      { name: 'StoredFile', from: typesSpecifier, type: true },
-      { name: 'ExternalRef', from: typesSpecifier, type: true },
+      { name: 'CustomMetadata', from: typesSpecifier, type: true },
+      { name: 'FileRef', from: typesSpecifier, type: true },
+      { name: 'FileObject', from: typesSpecifier, type: true },
+      { name: 'FileBody', from: typesSpecifier, type: true },
+      { name: 'ByteRange', from: typesSpecifier, type: true },
+      { name: 'PutBody', from: typesSpecifier, type: true },
+      { name: 'PutOptions', from: typesSpecifier, type: true },
+      { name: 'GetOptions', from: typesSpecifier, type: true },
+      { name: 'ListOptions', from: typesSpecifier, type: true },
+      { name: 'ListResult', from: typesSpecifier, type: true },
+      { name: 'FileMetaPatch', from: typesSpecifier, type: true },
       { name: 'FileStorageProvider', from: typesSpecifier, type: true },
-      {
-        name: 'FileStorageExternalProvider',
-        from: typesSpecifier,
-        type: true,
-      },
       { name: 'ImageFormat', from: typesSpecifier, type: true },
       { name: 'ImageTransformOptions', from: typesSpecifier, type: true },
       { name: 'ImageTransformResult', from: typesSpecifier, type: true },
@@ -177,7 +196,7 @@ export default defineNuxtModule<ModuleOptions>({
     // -------------------------------------------------------
     // tus resumable uploads (opt-in)
     // -------------------------------------------------------
-    const tusOpt: FilerTusOptions =
+    const tusOpt: AblageTusOptions =
       typeof options.tus === 'object' && options.tus !== null
         ? options.tus
         : {};
@@ -186,7 +205,7 @@ export default defineNuxtModule<ModuleOptions>({
       || (typeof options.tus === 'object'
         && options.tus !== null
         && tusOpt.enabled !== false);
-    const tusRoute = (tusOpt.route ?? '/_filer-tus').replace(/\/+$/, '');
+    const tusRoute = (tusOpt.route ?? '/_ablage/tus').replace(/\/+$/, '');
     const tusStagingDir = tusOpt.stagingDir ?? '.data/tus';
 
     if (tusEnabled) {
@@ -210,8 +229,8 @@ export default defineNuxtModule<ModuleOptions>({
         },
       ]);
 
-      nuxt.options.runtimeConfig.public.filer = defu(
-        nuxt.options.runtimeConfig.public.filer as
+      nuxt.options.runtimeConfig.public.ablage = defu(
+        nuxt.options.runtimeConfig.public.ablage as
           | Record<string, unknown>
           | undefined,
         { tusRoute }
@@ -221,27 +240,27 @@ export default defineNuxtModule<ModuleOptions>({
     // -------------------------------------------------------
     // @nuxt/image integration
     // -------------------------------------------------------
-    const imageOpt: FilerImageOptions =
+    const imageOpt: AblageImageOptions =
       typeof options.image === 'object' && options.image !== null
         ? options.image
         : {};
     const imageEnabled =
       options.image !== false && (imageOpt.enabled ?? true) !== false;
-    const ipxRoute = (imageOpt.route ?? '/_filer-ipx').replace(/\/+$/, '');
-    const providerName = imageOpt.providerName ?? 'filer';
+    const ipxRoute = (imageOpt.route ?? '/_ablage/image').replace(/\/+$/, '');
+    const providerName = imageOpt.providerName ?? 'ablage';
     const imageService = imageEnabled ? imageOpt.service ?? 'local' : 'local';
 
     // Service settings live in private runtime config so URLs and signing
-    // secrets can come from env (NUXT_FILER_IMAGE_*) instead of the build.
+    // secrets can come from env (NUXT_ABLAGE_IMAGE_*) instead of the build.
     if (imageService !== 'local') {
-      const runtimeFiler = (nuxt.options.runtimeConfig.filer ?? {}) as Record<string, unknown>;
-      runtimeFiler.image = defu(runtimeFiler.image as object, {
+      const runtimeAblage = (nuxt.options.runtimeConfig.ablage ?? {}) as Record<string, unknown>;
+      runtimeAblage.image = defu(runtimeAblage.image as object, {
         baseURL: imageOpt.baseURL ?? '',
         key: imageOpt.key ?? '',
         salt: imageOpt.salt ?? '',
         sourceURL: imageOpt.sourceURL ?? '',
       });
-      nuxt.options.runtimeConfig.filer = runtimeFiler;
+      nuxt.options.runtimeConfig.ablage = runtimeAblage;
 
       // The route also serves originals to the service (and upload-time
       // transforms depend on it), so register it even without @nuxt/image.
@@ -254,6 +273,15 @@ export default defineNuxtModule<ModuleOptions>({
     const shouldRegisterImage =
       imageEnabled
       && (imageOpt.enabled === 'force' || hasNuxtModule('@nuxt/image'));
+    // url() needs the image route, which exists for a service or a registered IPX integration.
+    const imageRouteEnabled = imageService !== 'local' || shouldRegisterImage;
+    const fileRoute = '/_ablage/file';
+
+    // Serves signedUrl() links; without a valid signature it answers 403.
+    addServerHandler({
+      route: `${fileRoute}/**`,
+      handler: resolver.resolve('./runtime/server/handlers/file'),
+    });
 
     if (shouldRegisterImage) {
       if (imageService === 'local') {
@@ -265,7 +293,7 @@ export default defineNuxtModule<ModuleOptions>({
 
       // Inject the provider into the user's image config. @nuxt/image
       // snapshots `options.providers` during its own setup, so if it has
-      // already run (i.e. was listed before nuxt-filer in `modules`) we have
+      // already run (i.e. was listed before ablage in `modules`) we have
       // to re-install it so the snapshot includes us. When it has not run
       // yet, mutating the options is enough — its upcoming setup will see
       // the provider naturally.
@@ -290,7 +318,7 @@ export default defineNuxtModule<ModuleOptions>({
       }
     } else if (imageEnabled && options.image !== false) {
       consola.info(
-        'nuxt-filer: @nuxt/image not detected — IPX integration disabled. Install `@nuxt/image` to enable optimized image variants.'
+        'ablage: @nuxt/image not detected — IPX integration disabled. Install `@nuxt/image` to enable optimized image variants.'
       );
     }
 
@@ -299,17 +327,19 @@ export default defineNuxtModule<ModuleOptions>({
     // -------------------------------------------------------
     nuxt.hook('nitro:config', (nitroConfig) => {
       nitroConfig.virtual = nitroConfig.virtual || {};
-      nitroConfig.virtual['#nuxt-filer-options'] = [
+      nitroConfig.virtual['#ablage-options'] = [
         `export const storageName = ${JSON.stringify(options.storageName)};`,
         `export const storagePath = ${JSON.stringify(options.storagePath)};`,
       ].join('\n');
       // Always emit the image virtual; the handler is only wired when enabled.
-      nitroConfig.virtual['#nuxt-filer-image'] = [
+      nitroConfig.virtual['#ablage-image'] = [
         `export const ipxRoute = ${JSON.stringify(ipxRoute)};`,
         `export const imageService = ${JSON.stringify(imageService)};`,
+        `export const imageRouteEnabled = ${JSON.stringify(imageRouteEnabled)};`,
+        `export const fileRoute = ${JSON.stringify(fileRoute)};`,
       ].join('\n');
       // Same for the tus virtual, so server imports never dangle.
-      nitroConfig.virtual['#nuxt-filer-tus'] = [
+      nitroConfig.virtual['#ablage-tus'] = [
         `export const tusRoute = ${JSON.stringify(tusRoute)};`,
         `export const tusStagingDir = ${JSON.stringify(tusStagingDir)};`,
         `export const tusMaxSize = ${JSON.stringify(tusOpt.maxSize ?? 0)};`,
@@ -335,6 +365,6 @@ export default defineNuxtModule<ModuleOptions>({
       }
     });
 
-    consola.success('nuxt-filer ready');
+    consola.success('ablage ready');
   },
 });

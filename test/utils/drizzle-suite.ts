@@ -1,266 +1,206 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import type { PGlite } from '@electric-sql/pglite';
-import type { Storage } from 'unstorage';
+import { describe, it, expect, beforeEach } from 'vitest'
+import type { PGlite } from '@electric-sql/pglite'
+import type { Storage } from 'unstorage'
 import {
   createDrizzleProvider,
   importUnstorageMetadata,
+  migrateDrizzleMetadata,
   type BlobStore,
-} from '../../src/runtime/server/providers/drizzle';
-import { createUnstorageProvider } from '../../src/runtime/server/providers/unstorage';
-import type { FileMeta } from '../../src/runtime/types';
+} from '../../src/runtime/server/providers/drizzle'
+import { setFileStorageProvider } from '../../src/runtime/server/provider'
+import { useFileStorage } from '../../src/runtime/server/utils/storage'
+import { rangeStream } from '../../src/runtime/server/utils/objects'
+import { runProviderSuite } from './provider-suite'
 
 /** The drizzle-orm entry points the suite needs, from whichever version is under test. */
 export interface DrizzleModules {
-  pgCore: typeof import('drizzle-orm/pg-core');
-  drizzle: typeof import('drizzle-orm/pglite').drizzle;
-  PGlite: typeof PGlite;
+  pgCore: typeof import('drizzle-orm/pg-core')
+  drizzle: typeof import('drizzle-orm/pglite').drizzle
+  PGlite: typeof PGlite
   /** Root storage behind the mocked `useStorage()`, with `documents` mounted. */
-  storage: Storage;
+  storage: Storage
 }
-
-const meta = (over: Partial<FileMeta> = {}): FileMeta => ({
-  name: 'file.txt',
-  mime: 'text/plain',
-  type: 'document',
-  version: 1,
-  ...over,
-});
 
 function memoryBlobs() {
-  const store = new Map<string, Buffer>();
+  const store = new Map<string, Uint8Array>()
   const blobs: BlobStore = {
     async put(key, body) {
-      store.set(key, Buffer.from(body));
+      store.set(key, new Uint8Array(body))
     },
-    async get(key) {
-      return store.get(key) ?? null;
+    async get(key, range) {
+      const data = store.get(key)
+      return data ? rangeStream(data, range) : null
     },
     async delete(key) {
-      store.delete(key);
+      store.delete(key)
     },
-  };
-  return { blobs, store };
+  }
+  return { blobs, store }
 }
 
+const TABLE_SQL = (name: string, metaType: string) => `create table ${name} (
+  id text not null,
+  group_id text not null,
+  metadata ${metaType},
+  created_at timestamp,
+  updated_at timestamp,
+  primary key (group_id, id)
+)`
+
 /**
- * Runs the provider against a real Drizzle + in-memory Postgres (pglite), once
- * with a `jsonb` metadata column (queries pushed into SQL) and once with plain
- * `json` (the portable in-JS path every other dialect takes).
+ * Runs the provider contract against real Drizzle + in-memory Postgres
+ * (pglite), with a `jsonb` metadata column (queries pushed into SQL) and with
+ * plain `json` (the portable in-JS path every other dialect takes), plus the
+ * Drizzle-specific behavior.
  */
 export function runDrizzleSuite({ pgCore, drizzle, PGlite, storage }: DrizzleModules) {
-  const { pgTable, text, json, jsonb, timestamp } = pgCore;
+  const { pgTable, text, json, jsonb, timestamp, primaryKey } = pgCore
 
-  for (const metaType of ['jsonb', 'json'] as const) {
-    describe(`metadata as ${metaType}`, () => {
-      const files = pgTable('filer_files', {
-        id: text('id').primaryKey(),
-        groupId: text('group_id').notNull(),
-        metadata: metaType === 'jsonb' ? jsonb('metadata') : json('metadata'),
-        createdAt: timestamp('created_at'),
-        updatedAt: timestamp('updated_at'),
-      });
+  const makeTable = (metaType: 'json' | 'jsonb') => pgTable('ablage_files', {
+    id: text('id').notNull(),
+    groupId: text('group_id').notNull(),
+    metadata: metaType === 'jsonb' ? jsonb('metadata') : json('metadata'),
+    createdAt: timestamp('created_at'),
+    updatedAt: timestamp('updated_at'),
+  }, t => [primaryKey({ columns: [t.groupId, t.id] })])
 
-      let setup: ReturnType<typeof memoryBlobs> & {
-        provider: ReturnType<typeof createDrizzleProvider>;
-        client: PGlite;
-      };
-
-      beforeEach(async () => {
-        const client = new PGlite();
-        await client.exec(`create table filer_files (
-          id text primary key,
-          group_id text not null,
-          metadata ${metaType},
-          created_at timestamp,
-          updated_at timestamp
-        )`);
-        const mem = memoryBlobs();
-        const db = drizzle({ client });
-        setup = { ...mem, client, provider: createDrizzleProvider({ db, table: files, blobs: mem.blobs }) };
-      });
-
-      it('create → get round-trips data, metadata and timestamps', async () => {
-        const { provider, store } = setup;
-        const { id } = await provider.create('studio', Buffer.from('hello'), meta({ name: 'a.png' }));
-
-        const file = await provider.get('studio', id);
-        expect(file!.data?.toString()).toBe('hello');
-        expect(file!.meta.name).toBe('a.png');
-        expect(file!.createdAt).toBeInstanceOf(Date);
-        expect(file!.updatedAt).toBeInstanceOf(Date);
-        expect(store.has(`studio/data/${id}`)).toBe(true);
-        expect((await provider.getData('studio', id))?.toString()).toBe('hello');
-      });
-
-      it('head returns the row without reading the blob', async () => {
-        const { provider, blobs } = setup;
-        const { id } = await provider.create('g', Buffer.from('x'), meta({ name: 'h.png' }));
-        const get = blobs.get;
-        let blobReads = 0;
-        blobs.get = async (key) => {
-          blobReads++;
-          return get(key);
-        };
-
-        const head = await provider.head!('g', id);
-        expect(head).toMatchObject({ id, groupId: 'g', meta: { name: 'h.png' } });
-        expect(head!.data).toBeUndefined();
-        expect(head!.createdAt).toBeInstanceOf(Date);
-        expect(await provider.head!('other', id)).toBeNull();
-        expect(blobReads).toBe(1); // only the row-less 'other' lookup checks the blob store
-      });
-
-      it('scopes get/has/remove by group', async () => {
-        const { provider } = setup;
-        const { id } = await provider.create('a', Buffer.from('x'), meta());
-
-        expect(await provider.has('a', id)).toBe(true);
-        expect(await provider.has('b', id)).toBe(false);
-        expect(await provider.get('b', id)).toBeNull();
-
-        await provider.remove('b', id);
-        expect(await provider.has('a', id)).toBe(true);
-        await provider.remove('a', id);
-        expect(await provider.has('a', id)).toBe(false);
-        expect(await provider.getData('a', id)).toBeNull();
-      });
-
-      it('list returns a group without data', async () => {
-        const { provider } = setup;
-        await provider.create('g', Buffer.from('1'), meta({ name: 'one' }));
-        await provider.create('g', Buffer.from('2'), meta({ name: 'two' }));
-        await provider.create('other', Buffer.from('3'), meta());
-
-        const list = await provider.list('g');
-        expect(list.map((f) => f.meta.name).sort()).toEqual(['one', 'two']);
-        expect(list.every((f) => f.data === undefined && f.groupId === 'g')).toBe(true);
-      });
-
-      it('update merges metadata and bumps updatedAt', async () => {
-        const { provider } = setup;
-        const { id } = await provider.create('g', Buffer.from('x'), meta({ comment: 'keep' }));
-        const before = (await provider.get('g', id))!.updatedAt!;
-
-        await new Promise((r) => setTimeout(r, 5));
-        await provider.update(id, { version: 2 });
-
-        const after = (await provider.get('g', id))!;
-        expect(after.meta).toMatchObject({ version: 2, comment: 'keep', name: 'file.txt' });
-        expect(after.updatedAt!.getTime()).toBeGreaterThan(before.getTime());
-        expect(await provider.getMeta(id)).toMatchObject({ version: 2 });
-      });
-
-      it('update throws for an unknown id', async () => {
-        await expect(setup.provider.update('nope', { version: 2 })).rejects.toThrow(/not found/);
-      });
-
-      it('findByMeta matches typed values, optionally within a group', async () => {
-        const { provider } = setup;
-        await provider.create('a', Buffer.from('x'), meta({ ref: 'r1', n: 5 }));
-        const { id } = await provider.create('b', Buffer.from('y'), meta({ ref: 'r1', n: 7 }));
-
-        expect((await provider.findByMeta({ key: 'n', value: 7 }))?.id).toBe(id);
-        expect(await provider.findByMeta({ key: 'n', value: '7' })).toBeNull();
-        expect((await provider.findByMeta({ key: 'ref', value: 'r1', groupId: 'b' }))?.groupId).toBe('b');
-        expect(await provider.findByMeta({ key: 'ref', value: 'r2' })).toBeNull();
-      });
-
-      it('clear removes a group\'s rows and blobs only', async () => {
-        const { provider, store } = setup;
-        await provider.create('g', Buffer.from('1'), meta());
-        await provider.create('g', Buffer.from('2'), meta());
-        const { id } = await provider.create('g2', Buffer.from('3'), meta());
-
-        await provider.clear('g');
-        expect(await provider.list('g')).toEqual([]);
-        expect([...store.keys()]).toEqual([`g2/data/${id}`]);
-      });
-
-      it('removes the blob when the insert fails', async () => {
-        const { provider, store, client } = setup;
-        await client.exec('drop table filer_files');
-        await expect(provider.create('g', Buffer.from('x'), meta())).rejects.toThrow();
-        expect(store.size).toBe(0);
-      });
-    });
+  const freshDb = async (metaType: 'json' | 'jsonb') => {
+    const client = new PGlite()
+    await client.exec(TABLE_SQL('ablage_files', metaType))
+    return { client, db: drizzle({ client }) }
   }
 
-  it('rejects a table missing a required column', async () => {
-    const table = pgTable('t', { id: text('id'), groupId: text('group_id') });
-    const db = drizzle({ client: new PGlite() });
-    const provider = createDrizzleProvider({ db, table, blobs: memoryBlobs().blobs });
-    await expect(provider.list('g')).rejects.toThrow(/no column "metadata"/);
-  });
+  for (const metaType of ['jsonb', 'json'] as const) {
+    runProviderSuite(`drizzle (${metaType})`, async () => {
+      const { db } = await freshDb(metaType)
+      return createDrizzleProvider({ db, table: makeTable(metaType), blobs: memoryBlobs().blobs })
+    })
+  }
 
-  it('supports custom column names and tables without timestamps', async () => {
-    const table = pgTable('docs', {
-      key: text('key').primaryKey(),
-      owner: text('owner').notNull(),
-      info: jsonb('info'),
-    });
-    const client = new PGlite();
-    await client.exec('create table docs (key text primary key, owner text not null, info jsonb)');
-    const provider = createDrizzleProvider({
-      db: drizzle({ client }),
-      table,
-      blobs: memoryBlobs().blobs,
-      columns: { id: 'key', groupId: 'owner', metadata: 'info' },
-    });
+  describe('createDrizzleProvider specifics', () => {
+    let ctx: Awaited<ReturnType<typeof freshDb>> & ReturnType<typeof memoryBlobs> & { storage: ReturnType<typeof useFileStorage> }
 
-    const { id } = await provider.create('o', Buffer.from('x'), meta({ name: 'n' }));
-    const file = await provider.get('o', id);
-    expect(file).toMatchObject({ id, groupId: 'o', meta: { name: 'n' } });
-    expect(file!.createdAt).toBeUndefined();
-  });
+    beforeEach(async () => {
+      const db = await freshDb('jsonb')
+      const blobs = memoryBlobs()
+      setFileStorageProvider(createDrizzleProvider({ db: db.db, table: makeTable('jsonb'), blobs: blobs.blobs }))
+      ctx = { ...db, ...blobs, storage: useFileStorage() }
+    })
+
+    it('stores system fields in the metadata column and fills the timestamp columns', async () => {
+      const put = await ctx.storage.put('g', new Uint8Array(3), { contentType: 'image/png', customMetadata: { alt: 'x' } })
+      const { rows } = await ctx.client.query<{ metadata: Record<string, unknown>, created_at: Date }>('select metadata, created_at from ablage_files')
+      expect(rows[0]!.metadata).toMatchObject({ size: 3, contentType: 'image/png', etag: put.etag, customMetadata: { alt: 'x' } })
+      expect(rows[0]!.created_at).toBeInstanceOf(Date)
+    })
+
+    it('merges concurrent jsonb metadata updates without losing keys', async () => {
+      const put = await ctx.storage.put('g', new Uint8Array(1))
+      await Promise.all([
+        ctx.storage.updateMeta(put, { customMetadata: { a: 1 } }),
+        ctx.storage.updateMeta(put, { customMetadata: { b: 2 } }),
+        ctx.storage.updateMeta(put, { name: 'n.txt' }),
+      ])
+      expect(await ctx.storage.head(put)).toMatchObject({ name: 'n.txt', customMetadata: { a: 1, b: 2 } })
+    })
+
+    it('removes the blob when the row insert fails', async () => {
+      await ctx.client.exec('drop table ablage_files')
+      await expect(ctx.storage.put('g', new Uint8Array(1))).rejects.toThrow()
+      expect(ctx.store.size).toBe(0)
+    })
+
+    it('migrates rows written by the 0.0.x provider', async () => {
+      // 0.0.x stored the flat FileMeta in the metadata column and timestamps in their columns.
+      const created = new Date('2026-01-01T00:00:00.000Z')
+      await ctx.client.query(
+        'insert into ablage_files (id, group_id, metadata, created_at, updated_at) values ($1, $2, $3, $4, $4), ($5, $2, $6, $4, $4)',
+        ['f1', 'org:5', JSON.stringify({ name: 'a.pdf', mime: 'application/pdf', type: 'doc', version: 1 }), created, 'gone', JSON.stringify({ name: 'x' })],
+      )
+      await ctx.blobs.put('org:5/data/f1', new TextEncoder().encode('pdf!'))
+
+      const options = { db: ctx.db, table: makeTable('jsonb'), blobs: ctx.blobs }
+      expect(await migrateDrizzleMetadata(options)).toEqual({ migrated: 1, skipped: 0, orphaned: ['org:5/gone'] })
+      expect(await migrateDrizzleMetadata(options)).toEqual({ migrated: 0, skipped: 1, orphaned: ['org:5/gone'] })
+
+      expect(await ctx.storage.head({ group: 'org:5', id: 'f1' })).toMatchObject({
+        size: 4,
+        name: 'a.pdf',
+        contentType: 'application/pdf',
+        uploadedAt: created,
+        updatedAt: created,
+        customMetadata: { type: 'doc', version: 1 },
+      })
+      expect(await ctx.storage.head({ group: 'org:5', id: 'gone' })).toBeNull()
+    })
+
+    it('rejects a table missing a required column', async () => {
+      const table = pgTable('t', { id: text('id'), groupId: text('group_id') })
+      setFileStorageProvider(createDrizzleProvider({ db: ctx.db, table, blobs: ctx.blobs }))
+      await expect(useFileStorage().list('g')).rejects.toThrow(/no column "metadata"/)
+    })
+
+    it('supports custom column names and tables without timestamps', async () => {
+      const table = pgTable('docs', { key: text('key').notNull(), owner: text('owner').notNull(), info: jsonb('info') })
+      await ctx.client.exec('create table docs (key text not null, owner text not null, info jsonb, primary key (owner, key))')
+      setFileStorageProvider(createDrizzleProvider({
+        db: ctx.db,
+        table,
+        blobs: ctx.blobs,
+        columns: { id: 'key', groupId: 'owner', metadata: 'info' },
+      }))
+      const storage = useFileStorage()
+      const put = await storage.put('o', new Uint8Array(2), { name: 'n' })
+      expect(await storage.head(put)).toMatchObject({ id: put.id, group: 'o', size: 2, name: 'n' })
+    })
+  })
 
   describe('with a Nitro storage mount', () => {
-    const table = pgTable('filer_files', {
-      id: text('id').primaryKey(),
-      groupId: text('group_id').notNull(),
-      metadata: jsonb('metadata'),
-      createdAt: timestamp('created_at'),
-      updatedAt: timestamp('updated_at'),
-    });
-    const setup = async () => {
-      await storage.clear('documents');
-      const client = new PGlite();
-      await client.exec(`create table filer_files (
-        id text primary key, group_id text not null, metadata jsonb,
-        created_at timestamp, updated_at timestamp
-      )`);
-      return drizzle({ client });
-    };
+    beforeEach(() => storage.clear('documents'))
 
     it('stores bytes in the mount, keyed like the unstorage provider', async () => {
-      const provider = createDrizzleProvider({ db: await setup(), table, blobs: 'documents' });
-      const { id } = await provider.create('g', Buffer.from('hi'), undefined);
-
-      expect(await storage.hasItem(`documents:g:data:${id}`)).toBe(true);
-      expect((await provider.getData('g', id))?.toString()).toBe('hi');
-    });
+      const { db } = await freshDb('jsonb')
+      setFileStorageProvider(createDrizzleProvider({ db, table: makeTable('jsonb'), blobs: 'documents' }))
+      const put = await useFileStorage().put('g', new TextEncoder().encode('hi'))
+      expect(await storage.hasItem(`documents:g:data:${put.id}`)).toBe(true)
+      expect(new TextDecoder().decode(await (await useFileStorage().get(put))!.bytes())).toBe('hi')
+    })
 
     it('refuses an unmounted storage instead of falling back to memory', async () => {
-      const provider = createDrizzleProvider({ db: await setup(), table, blobs: 'nope' });
-      await expect(provider.create('g', Buffer.from('hi'))).rejects.toThrow(/"nope" is not mounted/);
-    });
+      const { db } = await freshDb('jsonb')
+      setFileStorageProvider(createDrizzleProvider({ db, table: makeTable('jsonb'), blobs: 'nope' }))
+      await expect(useFileStorage().put('g', new Uint8Array(1))).rejects.toThrow(/"nope" is not mounted/)
+    })
 
-    it('imports unstorage metadata so existing files keep working', async () => {
-      const db = await setup();
-      const legacy = createUnstorageProvider('documents');
-      const { id } = await legacy.create('organization:5', Buffer.from('logo'), meta({ mime: 'image/svg+xml' }));
-      await legacy.create('ticket-1', Buffer.from('x'), meta({ name: 'a.pdf' }));
-      const before = (await legacy.get('organization:5', id))!;
+    it('imports 0.0.x unstorage sidecars into rows', async () => {
+      const { db } = await freshDb('jsonb')
+      const table = makeTable('jsonb')
+      const docs = (await import('unstorage')).prefixStorage(storage, 'documents')
+      await docs.setItemRaw('organization:5:data:legacy-1', new TextEncoder().encode('logo'))
+      await docs.setItem('organization:5:meta:legacy-1', {
+        name: 'logo.svg',
+        mime: 'image/svg+xml',
+        type: 'image',
+        version: 1,
+        alt: 'Logo',
+        _createdAt: '2026-01-01T00:00:00.000Z',
+        _updatedAt: '2026-01-02T00:00:00.000Z',
+      })
 
-      expect(await importUnstorageMetadata({ from: 'documents', db, table })).toEqual({ imported: 2, skipped: 0 });
-      expect(await importUnstorageMetadata({ from: 'documents', db, table })).toEqual({ imported: 0, skipped: 2 });
+      expect(await importUnstorageMetadata({ from: 'documents', db, table })).toEqual({ imported: 1, skipped: 0 })
+      expect(await importUnstorageMetadata({ from: 'documents', db, table })).toEqual({ imported: 0, skipped: 1 })
 
-      const provider = createDrizzleProvider({ db, table, blobs: 'documents' });
-      const file = (await provider.get('organization:5', id))!;
-      expect(file.data?.toString()).toBe('logo');
-      expect(file.meta).toEqual(before.meta);
-      expect(file.createdAt).toEqual(before.createdAt);
-      expect(await provider.getMeta(id)).toMatchObject({ mime: 'image/svg+xml' });
-      expect((await provider.list('ticket-1')).map((f) => f.meta.name)).toEqual(['a.pdf']);
-    });
-  });
+      setFileStorageProvider(createDrizzleProvider({ db, table, blobs: 'documents' }))
+      const file = await useFileStorage().get({ group: 'organization:5', id: 'legacy-1' })
+      expect(file).toMatchObject({
+        name: 'logo.svg',
+        contentType: 'image/svg+xml',
+        size: 4,
+        uploadedAt: new Date('2026-01-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-01-02T00:00:00.000Z'),
+        customMetadata: { type: 'image', version: 1, alt: 'Logo' },
+      })
+      expect(new TextDecoder().decode(await file!.bytes())).toBe('logo')
+    })
+  })
 }
