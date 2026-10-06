@@ -32,23 +32,24 @@ describe.skipIf(!imgproxyURL)(`image service: ${service}`, async () => {
   }).png().toBuffer()
 
   it('transforms at upload time through the service and cleans up the staged original', async () => {
-    const result = await $fetch<{ meta: { mime: string, width: number, height: number }, staged: unknown[] }>('/api/upload', {
+    const result = await $fetch<{ file: { contentType: string, width: number, height: number }, staged: unknown[] }>('/api/upload', {
       method: 'POST',
       body: {
-        groupId: 'organization:5',
+        group: 'organization:5',
         content: png.toString('base64'),
-        meta: { name: 'logo.png', mime: 'image/png', type: 'image', version: 1 },
+        contentType: 'image/png',
+        name: 'logo.png',
         transform: { width: 64, format: 'webp' },
       },
     })
-    expect(result.meta).toMatchObject({ mime: 'image/webp', width: 64, height: 32 })
+    expect(result.file).toMatchObject({ contentType: 'image/webp', width: 64, height: 32 })
     expect(result.staged).toEqual([])
   })
 
   it('serves originals on `_` and redirects variants to a working service URL', async () => {
-    const { id } = await $fetch<{ id: string }>('/api/upload', {
+    const { file: { id } } = await $fetch<{ file: { id: string } }>('/api/upload', {
       method: 'POST',
-      body: { groupId: 'organization:5', content: png.toString('base64'), meta: { name: 'logo.png', mime: 'image/png', type: 'image', version: 1 } },
+      body: { group: 'organization:5', content: png.toString('base64'), contentType: 'image/png', name: 'logo.png' },
     })
 
     const original = await fetch(`/_ablage/image/_/organization:5/${id}`)

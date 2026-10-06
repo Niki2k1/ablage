@@ -20,15 +20,16 @@ interface InfoResult {
 }
 
 interface PromoteResult {
+  group: string
   id: string
-  meta: { name: string, mime: string, type: string, version: number, comment?: string }
+  name?: string
+  contentType: string
+  size: number
+  customMetadata: Record<string, unknown>
 }
 
-interface FileResult {
-  id: string
-  groupId: string
-  meta: { name: string, mime: string }
-  data?: string
+interface FileResult extends PromoteResult {
+  text: string
 }
 
 function encodeMetadata(metadata: Record<string, string>): string {
@@ -140,24 +141,21 @@ describe('ablage tus', async () => {
 
     const result = await $fetch<PromoteResult>('/api/tus/promote', {
       method: 'POST',
-      body: { tusId, groupId: 'promote-group' },
+      body: { tusId, group: 'promote-group' },
     })
-    expect(result.id).toBeDefined()
-    // meta falls back to the tus metadata
-    expect(result.meta.name).toBe('promoted.txt')
-    expect(result.meta.mime).toBe('text/plain')
-    expect(result.meta.version).toBe(1)
+    // name and contentType fall back to the tus metadata
+    expect(result).toMatchObject({ group: 'promote-group', name: 'promoted.txt', contentType: 'text/plain', size: content.length })
 
-    const file = await $fetch<FileResult>(`/api/files/get?groupId=promote-group&id=${result.id}`)
-    expect(file.data).toBe(content)
-    expect(file.meta.name).toBe('promoted.txt')
+    const file = await $fetch<FileResult>(`/api/files/get?group=promote-group&id=${result.id}`)
+    expect(file.text).toBe(content)
+    expect(file.name).toBe('promoted.txt')
 
     // staged copy is removed by default
     const info = await $fetch<InfoResult>(`/api/tus/info?tusId=${tusId}`)
     expect(info.exists).toBe(false)
   })
 
-  it('promote applies meta overrides over tus metadata', async () => {
+  it('promote applies option overrides over tus metadata', async () => {
     const content = 'override meta'
     const { uploadPath, tusId } = await createUpload(content, {
       filename: 'original.bin',
@@ -169,15 +167,18 @@ describe('ablage tus', async () => {
       method: 'POST',
       body: {
         tusId,
-        groupId: 'override-group',
-        meta: { name: 'renamed.bin', type: 'attachment', version: 3, comment: 'hi' },
+        group: 'override-group',
+        id: 'fixed-id',
+        name: 'renamed.bin',
+        customMetadata: { kind: 'attachment', comment: 'hi' },
       },
     })
-    expect(result.meta.name).toBe('renamed.bin')
-    expect(result.meta.mime).toBe('application/octet-stream')
-    expect(result.meta.type).toBe('attachment')
-    expect(result.meta.version).toBe(3)
-    expect(result.meta.comment).toBe('hi')
+    expect(result).toMatchObject({
+      id: 'fixed-id',
+      name: 'renamed.bin',
+      contentType: 'application/octet-stream',
+      customMetadata: { kind: 'attachment', comment: 'hi' },
+    })
   })
 
   it('rejects promoting an incomplete upload with 409', async () => {
@@ -191,7 +192,7 @@ describe('ablage tus', async () => {
     const res = await fetch('/api/tus/promote', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tusId, groupId: 'partial-group' }),
+      body: JSON.stringify({ tusId, group: 'partial-group' }),
     })
     expect(res.status).toBe(409)
   })
@@ -200,7 +201,7 @@ describe('ablage tus', async () => {
     const res = await fetch('/api/tus/promote', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tusId: 'does-not-exist', groupId: 'g' }),
+      body: JSON.stringify({ tusId: 'does-not-exist', group: 'g' }),
     })
     expect(res.status).toBe(404)
   })
