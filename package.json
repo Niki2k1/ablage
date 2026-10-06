@@ -4,11 +4,11 @@
   "description": "File storage module for Nuxt",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Niki2k1/nuxt-filer.git"
+    "url": "git+https://github.com/Niki2k1/ablage.git"
   },
-  "homepage": "https://github.com/Niki2k1/nuxt-filer#readme",
+  "homepage": "https://github.com/Niki2k1/ablage#readme",
   "bugs": {
-    "url": "https://github.com/Niki2k1/nuxt-filer/issues"
+    "url": "https://github.com/Niki2k1/ablage/issues"
   },
   "license": "MIT",
   "author": "Niki2k1",
