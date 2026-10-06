@@ -1,5 +1,5 @@
 import { imageMeta } from 'image-meta';
-import { useRuntimeConfig } from 'nitropack/runtime';
+import { useRuntimeConfig } from 'nuxt/server';
 // @ts-expect-error virtual module injected by the module
 import { imageService, ipxRoute } from '#ablage-image';
 import type {

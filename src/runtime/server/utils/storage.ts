@@ -1,5 +1,5 @@
-import { createError } from 'h3';
 import type {
+  ImageTransformOptions,
   CustomMetadata,
   FileBody,
   FileMetaPatch,
@@ -11,7 +11,12 @@ import type {
   PutBody,
   PutOptions,
 } from '../../../runtime/types';
+import { deriveSecret } from 'nuxt/server';
+// @ts-expect-error virtual module injected by the module
+import { fileRoute, imageRouteEnabled, ipxRoute } from '#ablage-image';
 import { useFileStorageProvider } from '../provider';
+import { stringifyModifiers, transformToModifiers, type ImageModifiers } from './image-service';
+import { refPath, signFileClaims } from './signing';
 import { transformImage } from './image';
 import { transformWithService, useImageService } from './image-service-runtime';
 import {
@@ -19,6 +24,7 @@ import {
   bodyToBytes,
   clampRange,
   computeEtag,
+  httpError,
   normalizeGroup,
   normalizeRef,
   toFileBody,
@@ -38,6 +44,14 @@ export type {
 };
 
 const DEFAULT_LIST_LIMIT = 1000;
+
+/** `deriveSecret()` purpose for signed file URLs; the file route verifies with the same key. */
+export const SIGNING_PURPOSE = 'ablage:signed-url';
+
+const TRANSFORM_KEYS = new Set(['width', 'height', 'fit', 'withoutEnlargement', 'format', 'quality', 'animated', 'background']);
+function isTransformOptions(value: object): value is ImageTransformOptions {
+  return Object.keys(value).some((key) => TRANSFORM_KEYS.has(key));
+}
 
 /**
  * Server-side file storage API, backed by the registered provider.
@@ -88,11 +102,11 @@ export function useFileStorage() {
       const existing = await provider.head(ref);
       if (options.ifMatch !== undefined) {
         if (existing?.etag !== options.ifMatch) {
-          throw createError({ statusCode: 412, message: `File "${ref.group}/${ref.id}" does not match the expected etag` });
+          throw httpError(412, `File "${ref.group}/${ref.id}" does not match the expected etag`);
         }
       }
       else if (existing) {
-        throw createError({ statusCode: 409, message: `File "${ref.group}/${ref.id}" already exists (pass overwrite: true to replace it)` });
+        throw httpError(409, `File "${ref.group}/${ref.id}" already exists (pass overwrite: true to replace it)`);
       }
     }
 
@@ -138,7 +152,7 @@ export function useFileStorage() {
     const normalized = normalizeRef(ref);
     const updated = await provider.updateMeta(normalized, patch);
     if (!updated) {
-      throw createError({ statusCode: 404, message: `File "${normalized.group}/${normalized.id}" not found` });
+      throw httpError(404, `File "${normalized.group}/${normalized.id}" not found`);
     }
     return updated as FileObject<M>;
   }
@@ -196,5 +210,40 @@ export function useFileStorage() {
     return (await provider.findByMeta({ key, value, group: group && normalizeGroup(group) })) as FileObject<M> | null;
   }
 
-  return { head, get, put, updateMeta, remove, list, listAll, clear, findByMeta };
+  /**
+   * Path of a file on the image route: `/_ablage/image/<modifiers>/<group>/<id>`.
+   * Without `transform` it serves the original. The route is public, like
+   * `<NuxtImg provider="ablage">`; use {@link signedUrl} for private files.
+   */
+  function url(ref: FileRef, options: { transform?: ImageTransformOptions | ImageModifiers } = {}): string {
+    if (!imageRouteEnabled) {
+      throw new Error('[ablage] url() needs the image route; enable `ablage.image` (with @nuxt/image, `enabled: \'force\'`, or an image service)');
+    }
+    const normalized = normalizeRef(ref);
+    const { transform } = options;
+    const modifiers = !transform
+      ? {}
+      : isTransformOptions(transform) ? transformToModifiers(transform) : transform;
+    return `${ipxRoute}/${stringifyModifiers(modifiers)}/${refPath(normalized)}`;
+  }
+
+  /**
+   * A time-limited link to a file, served by the module's file route
+   * (`/_ablage/file/...`) without any route of your own. Signed with a key
+   * derived from Nuxt's `appSecret` (set `NUXT_APP_SECRET`, ≥ 32 characters).
+   */
+  async function signedUrl(
+    ref: FileRef,
+    options: { expiresIn?: number; download?: boolean } = {},
+  ): Promise<string> {
+    const normalized = normalizeRef(ref);
+    const expires = Math.floor(Date.now() / 1000) + Math.max(1, Math.floor(options.expiresIn ?? 3600));
+    const download = !!options.download;
+    const sig = await signFileClaims(await deriveSecret(SIGNING_PURPOSE), { ...normalized, expires, download });
+    const query = new URLSearchParams({ expires: String(expires), sig });
+    if (download) query.set('download', '1');
+    return `${fileRoute}/${refPath(normalized)}?${query}`;
+  }
+
+  return { head, get, put, updateMeta, remove, list, listAll, clear, findByMeta, url, signedUrl };
 }

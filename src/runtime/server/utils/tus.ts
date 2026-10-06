@@ -1,4 +1,3 @@
-import { createError } from 'h3';
 import { consola } from 'consola';
 import {
   Server,
@@ -11,6 +10,7 @@ import { FileStore } from '@tus/file-store';
 import { tusRoute, tusStagingDir, tusMaxSize, tusExpiration } from '#ablage-tus';
 import type { FileObject, TusPromoteOptions } from '../../../runtime/types';
 import { useFileStorage } from './storage';
+import { httpError } from './objects';
 
 export type { TusPromoteOptions };
 
@@ -148,24 +148,15 @@ export function useTusStaging() {
   ): Promise<FileObject> {
     const upload = await info(tusId);
     if (!upload) {
-      throw createError({
-        statusCode: 404,
-        statusMessage: `No staged tus upload found for id: ${tusId}`,
-      });
+      throw httpError(404, `No staged tus upload found for id: ${tusId}`);
     }
     if (typeof upload.size === 'number' && upload.offset !== upload.size) {
-      throw createError({
-        statusCode: 409,
-        statusMessage: `Staged tus upload is incomplete: ${tusId} (${upload.offset}/${upload.size} bytes)`,
-      });
+      throw httpError(409, `Staged tus upload is incomplete: ${tusId} (${upload.offset}/${upload.size} bytes)`);
     }
 
     const data = await read(tusId);
     if (!data) {
-      throw createError({
-        statusCode: 404,
-        statusMessage: `Staged tus upload data is missing for id: ${tusId}`,
-      });
+      throw httpError(404, `Staged tus upload data is missing for id: ${tusId}`);
     }
 
     const tusMeta = upload.metadata ?? {};
