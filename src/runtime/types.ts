@@ -1,11 +1,102 @@
-export interface FileMeta {
-  name: string;
-  mime: string;
-  type: string;
-  version: number;
-  username?: string;
-  comment?: string;
-  [key: string]: unknown;
+/** Custom, app-defined metadata stored with a file. Values must be JSON-serializable. */
+export type CustomMetadata = Record<string, unknown>;
+
+/** Addresses a stored file. */
+export interface FileRef {
+  /** The group the file belongs to, e.g. `'avatars'` or `'project:42'`. */
+  group: string;
+  /** The file id: server-generated, or chosen via `put({ id })`. */
+  id: string;
+}
+
+/** A stored file's metadata: system fields plus your {@link CustomMetadata}. */
+export interface FileObject<M extends CustomMetadata = CustomMetadata> extends FileRef {
+  /** Size in bytes. */
+  size: number;
+  /** MIME type, e.g. `image/webp`. Default: `application/octet-stream`. */
+  contentType: string;
+  /** Content hash (SHA-256, base64url). Changes only when the bytes change. */
+  etag: string;
+  /** When these bytes were written. */
+  uploadedAt: Date;
+  /** When the bytes or metadata last changed. */
+  updatedAt: Date;
+  /** Original filename, used e.g. for `content-disposition`. */
+  name?: string;
+  /** `cache-control` for serving this file; overrides the route default. */
+  cacheControl?: string;
+  /** Image dimensions, when known (set by upload-time transforms). */
+  width?: number;
+  height?: number;
+  customMetadata: M;
+}
+
+/** A byte range; `length` defaults to the rest of the file. */
+export interface ByteRange {
+  offset: number;
+  length?: number;
+}
+
+/** A file with a readable body, as returned by `get()`. */
+export interface FileBody<M extends CustomMetadata = CustomMetadata> extends FileObject<M> {
+  /** The file's bytes (or the requested range), as a stream. Read it at most once. */
+  body: ReadableStream<Uint8Array>;
+  /** Read the whole body into memory. */
+  bytes(): Promise<Uint8Array>;
+  /** The range actually returned, when one was requested (clamped to the file size). */
+  range?: { offset: number; length: number };
+}
+
+/** Accepted upload bodies. */
+export type PutBody = Uint8Array | ArrayBuffer | Blob | ReadableStream<Uint8Array>;
+
+export interface PutOptions<M extends CustomMetadata = CustomMetadata> {
+  /**
+   * Store at this id instead of a generated UUID. Ids may contain letters,
+   * digits, `.`, `_` and `-` (max 128 characters).
+   */
+  id?: string;
+  /** Replace an existing file at `id`. Default: `false` (a 409 error if it exists). */
+  overwrite?: boolean;
+  /** Only replace the file if its current `etag` matches (a 412 error otherwise). Implies `overwrite`. */
+  ifMatch?: string;
+  contentType?: string;
+  name?: string;
+  cacheControl?: string;
+  customMetadata?: M;
+  /** Process an image before storing it (via the image service, or locally with sharp). */
+  transform?: ImageTransformOptions;
+}
+
+export interface GetOptions {
+  range?: ByteRange;
+}
+
+export interface ListOptions {
+  /** Max files per page. Default: 1000. */
+  limit?: number;
+  /** The `cursor` of the previous page. */
+  cursor?: string;
+  /** Only files whose id starts with this prefix. */
+  prefix?: string;
+}
+
+export interface ListResult<M extends CustomMetadata = CustomMetadata> {
+  objects: FileObject<M>[];
+  /** Pass to the next `list()` call; set when `hasMore`. */
+  cursor?: string;
+  hasMore: boolean;
+}
+
+/**
+ * Metadata changes for `updateMeta()`. `customMetadata` is merged
+ * shallowly into the existing object; the other fields are replaced.
+ */
+export interface FileMetaPatch {
+  name?: string;
+  contentType?: string;
+  cacheControl?: string;
+  customMetadata?: CustomMetadata;
 }
 
 /** Output image format for {@link transformImage}. */
@@ -13,7 +104,7 @@ export type ImageFormat = 'webp' | 'png' | 'jpeg' | 'avif' | 'gif';
 
 /**
  * Options for upload-time image processing, backed by the optional `sharp`
- * peer dependency. Passed via `useFileStorage().upload(.., { transform })` or
+ * peer dependency. Passed via `useFileStorage().put(.., { transform })` or
  * to the standalone `transformImage()` util.
  */
 export interface ImageTransformOptions {
@@ -98,78 +189,34 @@ export interface UseTusUploadOptions {
 }
 
 /** Options for `useTusStaging().promote()`. */
-export interface TusPromoteOptions {
-  /**
-   * Overrides for the stored file's meta. Fields not given fall back to the
-   * tus upload metadata (`filename`, `filetype`) and sensible defaults.
-   */
-  meta?: Partial<FileMeta>;
-  /** Optional upload-time image processing, as in `useFileStorage().upload()`. */
-  transform?: ImageTransformOptions;
+export interface TusPromoteOptions extends Pick<PutOptions, 'id' | 'overwrite' | 'contentType' | 'name' | 'cacheControl' | 'customMetadata' | 'transform'> {
   /** Remove the staged upload after promoting it. Default: `true`. */
   removeStaged?: boolean;
 }
 
-export interface ExternalRef {
-  /** External system identifier, e.g. 'jira', 'sharepoint' */
-  source: string;
-  /** ID of the file in the external system */
-  externalId: string;
-  /** URL to the file in the external system */
-  externalUrl?: string;
-  /** When metadata/thumbnail was last synced */
-  cachedAt?: Date;
-}
-
-export interface StoredFile {
-  id: string;
-  groupId: string;
-  data?: Buffer;
-  meta: FileMeta;
-  external?: ExternalRef;
-  createdAt?: Date;
-  updatedAt?: Date;
-}
-
-export interface FileStorageExternalProvider {
-  /** Sync local cache with the external system (pull latest metadata/thumbnail) */
-  sync(groupId: string, id: string): Promise<void>;
-  /** Push local file data and metadata to the external system */
-  push(
-    groupId: string,
-    id: string,
-    data: Buffer,
-    meta: FileMeta
-  ): Promise<void>;
-  /** Pull a file from the external system into local storage */
-  pull(groupId: string, externalRef: ExternalRef): Promise<StoredFile>;
-}
-
+/**
+ * The storage backend behind `useFileStorage()`. Implement it to store files
+ * anywhere; register it with `setFileStorageProvider()` in a Nitro plugin.
+ *
+ * `useFileStorage()` does the bookkeeping (ids, size, etag, timestamps,
+ * overwrite checks, transforms), so a provider only persists what it's given.
+ */
 export interface FileStorageProvider {
-  create(
-    groupId: string,
-    data: Buffer | Uint8Array,
-    meta?: FileMeta
-  ): Promise<{ id: string }>;
-  get(groupId: string, id: string): Promise<StoredFile | null>;
+  /** The file's metadata, or `null` if it doesn't exist. Must not read the bytes. */
+  head(ref: FileRef): Promise<FileObject | null>;
   /**
-   * Like {@link get} but without reading the bytes (`data` is undefined).
-   * Optional: when a provider doesn't implement it, callers fall back to `get()`.
+   * The file's bytes as a stream, or `null` if they don't exist. A `range` is
+   * clamped to the stored size (an offset past the end yields an empty stream).
    */
-  head?(groupId: string, id: string): Promise<StoredFile | null>;
-  getData(groupId: string, id: string): Promise<Buffer | null>;
-  getMeta(id: string): Promise<FileMeta | null>;
-  list(groupId: string): Promise<StoredFile[]>;
-  update(id: string, meta: Partial<FileMeta>): Promise<void>;
-  remove(groupId: string, id: string): Promise<void>;
-  clear(groupId: string): Promise<void>;
-  has(groupId: string, id: string): Promise<boolean>;
-  findByMeta(filter: {
-    key: string;
-    value: unknown;
-    groupId?: string;
-  }): Promise<StoredFile | null>;
-
-  /** Optional external file sync support */
-  external?: FileStorageExternalProvider;
+  read(ref: FileRef, range?: ByteRange): Promise<ReadableStream<Uint8Array> | null>;
+  /** Store bytes and metadata, replacing any existing file at the same ref. */
+  write(object: FileObject, data: Uint8Array): Promise<void>;
+  /** Apply a {@link FileMetaPatch} (bumping `updatedAt`); `null` if the file doesn't exist. */
+  updateMeta(ref: FileRef, patch: FileMetaPatch): Promise<FileObject | null>;
+  /** Delete files; missing ones are ignored. */
+  remove(refs: FileRef[]): Promise<void>;
+  /** A page of a group's files, ordered by id. */
+  list(group: string, options: Required<Pick<ListOptions, 'limit'>> & Omit<ListOptions, 'limit'>): Promise<ListResult>;
+  /** Optional: the first file whose `customMetadata[key] === value`. */
+  findByMeta?(filter: { key: string; value: unknown; group?: string }): Promise<FileObject | null>;
 }

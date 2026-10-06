@@ -161,15 +161,18 @@ export default defineNuxtModule<ModuleOptions>({
     // -------------------------------------------------------
     const typesSpecifier = 'ablage/runtime/types';
     addImports([
-      { name: 'FileMeta', from: typesSpecifier, type: true },
-      { name: 'StoredFile', from: typesSpecifier, type: true },
-      { name: 'ExternalRef', from: typesSpecifier, type: true },
+      { name: 'CustomMetadata', from: typesSpecifier, type: true },
+      { name: 'FileRef', from: typesSpecifier, type: true },
+      { name: 'FileObject', from: typesSpecifier, type: true },
+      { name: 'FileBody', from: typesSpecifier, type: true },
+      { name: 'ByteRange', from: typesSpecifier, type: true },
+      { name: 'PutBody', from: typesSpecifier, type: true },
+      { name: 'PutOptions', from: typesSpecifier, type: true },
+      { name: 'GetOptions', from: typesSpecifier, type: true },
+      { name: 'ListOptions', from: typesSpecifier, type: true },
+      { name: 'ListResult', from: typesSpecifier, type: true },
+      { name: 'FileMetaPatch', from: typesSpecifier, type: true },
       { name: 'FileStorageProvider', from: typesSpecifier, type: true },
-      {
-        name: 'FileStorageExternalProvider',
-        from: typesSpecifier,
-        type: true,
-      },
       { name: 'ImageFormat', from: typesSpecifier, type: true },
       { name: 'ImageTransformOptions', from: typesSpecifier, type: true },
       { name: 'ImageTransformResult', from: typesSpecifier, type: true },
