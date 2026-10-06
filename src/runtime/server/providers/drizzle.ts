@@ -6,7 +6,8 @@ import type {
   FileRef,
   FileStorageProvider,
 } from '../../../runtime/types';
-import { applyPatch, computeEtag, rangeStream } from '../utils/objects';
+import { applyPatch, rangeStream, streamToBytes } from '../utils/objects';
+import { legacyToObject, parseStoredMetadata, type MigrationResult } from '../utils/legacy';
 
 /**
  * Where the drizzle provider keeps file bytes — the database only holds
@@ -360,54 +361,74 @@ export async function importUnstorageMetadata(
   const metaKeys = (await storage.getKeys()).filter((key) => key.includes(':meta:'));
   let imported = 0;
 
-  for (let i = 0; i < metaKeys.length; i += 50) {
-    const batch = await Promise.all(
-      metaKeys.slice(i, i + 50).map(async (key) => {
-        const at = key.lastIndexOf(':meta:');
-        const group = key.slice(0, at);
-        const id = key.slice(at + ':meta:'.length);
-        const legacy = await storage.getItem<Record<string, unknown>>(key);
-        const data = await storage.getItemRaw<Uint8Array>(`${group}:data:${id}`);
-        return { group, id, legacy, data: data ? new Uint8Array(data) : null };
-      }),
-    );
-
-    for (const { group, id, legacy, data } of batch) {
-      if (!legacy || !data || (await db.select({ id: c.id }).from(table).where(c.orm.and(c.orm.eq(c.groupId, group), c.orm.eq(c.id, id))).limit(1)).length) {
-        continue;
-      }
-      const { name, mime, _createdAt, _updatedAt, width, height, ...custom } = legacy as Record<string, unknown> & {
-        name?: string;
-        mime?: string;
-        _createdAt?: string;
-        _updatedAt?: string;
-        width?: number;
-        height?: number;
-      };
-      const uploadedAt = _createdAt ? new Date(_createdAt) : new Date();
-      const object: FileObject = {
-        group,
-        id,
-        size: data.length,
-        contentType: mime || 'application/octet-stream',
-        etag: await computeEtag(data),
-        uploadedAt,
-        updatedAt: _updatedAt ? new Date(_updatedAt) : uploadedAt,
-        ...(name ? { name } : {}),
-        ...(typeof width === 'number' ? { width } : {}),
-        ...(typeof height === 'number' ? { height } : {}),
-        customMetadata: custom,
-      };
-      await db.insert(table).values({
-        [names.id]: id,
-        [names.groupId]: group,
-        [names.metadata]: toStored(object),
-        ...(c.hasCreatedAt ? { [names.createdAt]: object.uploadedAt } : {}),
-        ...(c.hasUpdatedAt ? { [names.updatedAt]: object.updatedAt } : {}),
-      });
-      imported++;
-    }
+  for (const key of metaKeys) {
+    const at = key.lastIndexOf(':meta:');
+    const ref = { group: key.slice(0, at), id: key.slice(at + ':meta:'.length) };
+    const exists = await db.select({ id: c.id }).from(table)
+      .where(c.orm.and(c.orm.eq(c.groupId, ref.group), c.orm.eq(c.id, ref.id))).limit(1);
+    if (exists.length) continue;
+    const parsed = parseStoredMetadata(await storage.getItem(key));
+    const data = await storage.getItemRaw<Uint8Array>(`${ref.group}:data:${ref.id}`);
+    if (!parsed || !data) continue;
+    const object = parsed.current ?? await legacyToObject(ref, parsed.legacy, new Uint8Array(data));
+    await db.insert(table).values({
+      [names.id]: ref.id,
+      [names.groupId]: ref.group,
+      [names.metadata]: toStored(object),
+      ...(c.hasCreatedAt ? { [names.createdAt]: object.uploadedAt } : {}),
+      ...(c.hasUpdatedAt ? { [names.updatedAt]: object.updatedAt } : {}),
+    });
+    imported++;
   }
 
   return { imported, skipped: metaKeys.length - imported };
+}
+
+export interface MigrateDrizzleMetadataOptions {
+  db: DrizzleDatabase;
+  table: Table;
+  /** The blob store the 0.0.x provider used (needed to compute `size` and `etag`). */
+  blobs: BlobStore | string;
+  columns?: DrizzleProviderOptions['columns'];
+}
+
+/**
+ * Upgrade rows written by nuxt-filer 0.0.x's Drizzle provider, in place: the
+ * metadata column's old `FileMeta` becomes a FileObject (`size` and `etag`
+ * computed from the stored bytes; timestamps taken from the row's timestamp
+ * columns). Rows already converted are skipped, so it is safe to re-run.
+ *
+ * Change the table's primary key to `(groupId, id)` separately, with your
+ * usual schema migrations.
+ */
+export async function migrateDrizzleMetadata(options: MigrateDrizzleMetadataOptions): Promise<MigrationResult> {
+  const { db, table } = options;
+  const blobs = typeof options.blobs === 'string' ? storageBlobStore(options.blobs) : options.blobs;
+  const { names, ready } = bindTable(table, options.columns, 'migrateDrizzleMetadata');
+  const c = await ready();
+  const result: MigrationResult = { migrated: 0, skipped: 0, orphaned: [] };
+
+  const rows: Row[] = await db.select().from(table);
+  for (const row of rows) {
+    const ref = { group: String(row[names.groupId]), id: String(row[names.id]) };
+    const parsed = parseStoredMetadata(row[names.metadata]);
+    if (parsed?.current) {
+      result.skipped++;
+      continue;
+    }
+    const body = await blobs.get(blobKey(ref.group, ref.id));
+    if (!body) {
+      result.orphaned.push(`${ref.group}/${ref.id}`);
+      continue;
+    }
+    const object = await legacyToObject(ref, parsed?.legacy, await streamToBytes(body), {
+      createdAt: row[names.createdAt],
+      updatedAt: row[names.updatedAt],
+    });
+    await db.update(table)
+      .set({ [names.metadata]: toStored(object) })
+      .where(c.orm.and(c.orm.eq(c.groupId, ref.group), c.orm.eq(c.id, ref.id)));
+    result.migrated++;
+  }
+  return result;
 }

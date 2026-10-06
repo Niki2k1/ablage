@@ -139,6 +139,10 @@ export default defineNuxtModule<ModuleOptions>({
         from: resolver.resolve('./runtime/server/providers/unstorage'),
       },
       {
+        name: 'migrateUnstorageMetadata',
+        from: resolver.resolve('./runtime/server/providers/unstorage'),
+      },
+      {
         name: 'createS3Provider',
         from: resolver.resolve('./runtime/server/providers/s3'),
       },
@@ -147,11 +151,19 @@ export default defineNuxtModule<ModuleOptions>({
         from: resolver.resolve('./runtime/server/providers/s3'),
       },
       {
+        name: 'migrateS3Metadata',
+        from: resolver.resolve('./runtime/server/providers/s3'),
+      },
+      {
         name: 'createDrizzleProvider',
         from: resolver.resolve('./runtime/server/providers/drizzle'),
       },
       {
         name: 'importUnstorageMetadata',
+        from: resolver.resolve('./runtime/server/providers/drizzle'),
+      },
+      {
+        name: 'migrateDrizzleMetadata',
         from: resolver.resolve('./runtime/server/providers/drizzle'),
       },
     ]);
