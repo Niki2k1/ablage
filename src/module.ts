@@ -261,6 +261,15 @@ export default defineNuxtModule<ModuleOptions>({
     const shouldRegisterImage =
       imageEnabled
       && (imageOpt.enabled === 'force' || hasNuxtModule('@nuxt/image'));
+    // url() needs the image route, which exists for a service or a registered IPX integration.
+    const imageRouteEnabled = imageService !== 'local' || shouldRegisterImage;
+    const fileRoute = '/_ablage/file';
+
+    // Serves signedUrl() links; without a valid signature it answers 403.
+    addServerHandler({
+      route: `${fileRoute}/**`,
+      handler: resolver.resolve('./runtime/server/handlers/file'),
+    });
 
     if (shouldRegisterImage) {
       if (imageService === 'local') {
@@ -314,6 +323,8 @@ export default defineNuxtModule<ModuleOptions>({
       nitroConfig.virtual['#ablage-image'] = [
         `export const ipxRoute = ${JSON.stringify(ipxRoute)};`,
         `export const imageService = ${JSON.stringify(imageService)};`,
+        `export const imageRouteEnabled = ${JSON.stringify(imageRouteEnabled)};`,
+        `export const fileRoute = ${JSON.stringify(fileRoute)};`,
       ].join('\n');
       // Same for the tus virtual, so server imports never dangle.
       nitroConfig.virtual['#ablage-tus'] = [

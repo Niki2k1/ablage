@@ -1,10 +1,4 @@
-import {
-  defineEventHandler,
-  sendWebResponse,
-  toWebRequest,
-  useBase,
-  type EventHandler,
-} from 'h3';
+import { defineEventHandler, getRequestURL } from 'nuxt/server';
 // Namespace import: ipx 3 and 4 export different handler factories, and a named
 // import of one that doesn't exist fails at module link time (crashing the
 // server at boot) instead of letting us feature-detect.
@@ -12,9 +6,9 @@ import * as ipxModule from 'ipx';
 import type { IPXStorage } from 'ipx';
 // @ts-expect-error virtual module injected by the module
 import { ipxRoute } from '#ablage-image';
+import type { FileRef } from '../../../runtime/types';
 import { useFileStorageProvider } from '../provider';
 import { normalizeRef, streamToBytes } from '../utils/objects';
-import type { FileRef } from '../../../runtime/types';
 
 /**
  * Maps an IPX `id` (the path after the modifiers segment, `group/id`) to a
@@ -58,42 +52,25 @@ const ablageStorage: IPXStorage = {
   },
 };
 
-type IPX4 = {
-  createIPXFetchHandler: (
-    ipx: ReturnType<typeof ipxModule.createIPX>,
-    opts?: { parseURL?: (url: string) => unknown },
-  ) => (request: Request) => Response | Promise<Response>;
-  parseIPXURL: (url: string) => unknown;
-};
-type IPX3 = {
-  createIPXH3Handler: (ipx: ReturnType<typeof ipxModule.createIPX>) => EventHandler;
-};
+type FetchHandler = (request: Request) => Response | Promise<Response>;
 
-function createHandler(): EventHandler {
+/** ipx 4: `createIPXFetchHandler`; ipx 3: `createIPXWebServer`. Both take `/<modifiers>/<id>` requests. */
+function createHandler(): FetchHandler {
   const ipx = ipxModule.createIPX({ storage: ablageStorage });
-  const ipx4 = ipxModule as unknown as Partial<IPX4>;
-
-  if (ipx4.createIPXFetchHandler && ipx4.parseIPXURL) {
-    // ipx 4: a fetch handler. Strip the route prefix from the URL it parses so
-    // it sees `/<modifiers>/<groupId>/<fileId>`.
-    const { parseIPXURL } = ipx4;
-    const fetchHandler = ipx4.createIPXFetchHandler(ipx, {
-      parseURL(url) {
-        const parsed = new URL(url);
-        parsed.pathname = parsed.pathname.slice(ipxRoute.length) || '/';
-        return parseIPXURL(parsed.href);
-      },
-    });
-    return defineEventHandler(async (event) =>
-      sendWebResponse(event, await fetchHandler(toWebRequest(event))),
-    );
-  }
-
-  // ipx 3: an h3 handler. `useBase` rewrites the path for the inner handler
-  // (assigning `event.path` throws — it's a getter-only accessor).
-  return useBase(ipxRoute, (ipxModule as unknown as IPX3).createIPXH3Handler(ipx));
+  const factories = ipxModule as unknown as {
+    createIPXFetchHandler?: (ipx: unknown) => FetchHandler;
+    createIPXWebServer?: (ipx: unknown) => FetchHandler;
+  };
+  const factory = factories.createIPXFetchHandler ?? factories.createIPXWebServer;
+  if (!factory) throw new Error('[ablage] unsupported ipx version (expected ipx 3 or 4)');
+  return factory(ipx);
 }
 
-let _handler: EventHandler | null = null;
+let _handler: FetchHandler | undefined;
 
-export default defineEventHandler((event) => (_handler ??= createHandler())(event));
+export default defineEventHandler((event) => {
+  // IPX expects `/<modifiers>/<group>/<id>`; strip the route prefix.
+  const url = getRequestURL(event);
+  url.pathname = url.pathname.slice(ipxRoute.length) || '/';
+  return (_handler ??= createHandler())(new Request(url, { method: event.req.method, headers: event.req.headers }));
+});

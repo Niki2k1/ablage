@@ -121,6 +121,38 @@ describe('ablage', async () => {
     })
   })
 
+  describe('signedUrl', () => {
+    it('serves a file only through a valid, unexpired link', async () => {
+      const file = await put({ group: 'private', content: 'secret', contentType: 'text/plain', name: 'secret.txt' })
+      const link = await $fetch<string>(`/api/files/signed-url?${query({ group: 'private', id: file.id, expiresIn: '60' })}`)
+      expect(link).toMatch(new RegExp(`^/_ablage/file/private/${file.id}\\?expires=\\d+&sig=`))
+
+      const ok = await fetch(link)
+      expect(ok.status).toBe(200)
+      expect(await ok.text()).toBe('secret')
+      expect(ok.headers.get('cache-control')).toMatch(/^private, max-age=(5\d|60)$/)
+      expect(ok.headers.get('content-disposition')).toMatch(/^inline/)
+
+      const tampered = link.replace(file.id, 'other-id')
+      expect((await fetch(tampered)).status).toBe(403)
+      expect((await fetch(link.replace(/sig=[^&]+/, 'sig=AAAA'))).status).toBe(403)
+      expect((await fetch(`/_ablage/file/private/${file.id}`)).status).toBe(403)
+
+      const ranged = await fetch(link, { headers: { range: 'bytes=0-2' } })
+      expect(ranged.status).toBe(206)
+      expect(await ranged.text()).toBe('sec')
+    })
+
+    it('rejects expired links and serves download links as attachments', async () => {
+      const file = await put({ group: 'private', content: 'x', name: 'report.pdf' })
+      const expired = await $fetch<string>(`/api/files/signed-url?${query({ group: 'private', id: file.id, expiresIn: '1' })}`)
+      const download = await $fetch<string>(`/api/files/signed-url?${query({ group: 'private', id: file.id, download: '1' })}`)
+      expect((await fetch(download)).headers.get('content-disposition')).toMatch(/^attachment; filename="report\.pdf"/)
+      await new Promise(r => setTimeout(r, 2100))
+      expect((await fetch(expired)).status).toBe(403)
+    })
+  })
+
   it('validates uploads with readUploadedFile', async () => {
     const form = new FormData()
     form.append('file', new File([new Uint8Array(16)], 'model.stl', { type: '' }))

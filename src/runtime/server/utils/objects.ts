@@ -130,3 +130,43 @@ export function applyPatch(object: FileObject, patch: import('../../../runtime/t
     updatedAt: new Date(),
   };
 }
+
+const STATUS_TEXT: Record<number, string> = {
+  400: 'Bad Request',
+  403: 'Forbidden',
+  404: 'Not Found',
+  409: 'Conflict',
+  412: 'Precondition Failed',
+  413: 'Payload Too Large',
+  415: 'Unsupported Media Type',
+};
+
+/**
+ * An expected HTTP error (404, 409, …). Carries h3's error marker, which both
+ * h3 v1 and Nuxt's `isNuxtError()` check, so it's rendered with its status and
+ * not logged as an unhandled crash — without importing h3.
+ */
+export class HttpError extends Error {
+  static readonly __h3_error__ = true;
+  readonly status: number;
+  readonly statusCode: number;
+  readonly statusMessage: string;
+  readonly fatal = false;
+  readonly unhandled = false;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'HttpError';
+    this.status = status;
+    this.statusCode = status;
+    this.statusMessage = STATUS_TEXT[status] ?? 'Error';
+  }
+
+  toJSON() {
+    return { message: this.message, statusCode: this.statusCode, statusMessage: this.statusMessage };
+  }
+}
+
+export function httpError(status: number, message: string): HttpError {
+  return new HttpError(status, message);
+}

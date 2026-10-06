@@ -32,7 +32,7 @@ export function parseModifiers(segment: string): ImageModifiers {
   return modifiers;
 }
 
-function stringifyModifiers(modifiers: ImageModifiers): string {
+export function stringifyModifiers(modifiers: ImageModifiers): string {
   const parts = Object.entries(modifiers).map(([key, value]) =>
     value === '' ? key : `${key}_${encodeURIComponent(value)}`,
   );
