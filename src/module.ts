@@ -191,6 +191,15 @@ export default defineNuxtModule<ModuleOptions>({
       { name: 'TusUploadState', from: typesSpecifier, type: true },
       { name: 'UseTusUploadOptions', from: typesSpecifier, type: true },
       { name: 'TusPromoteOptions', from: typesSpecifier, type: true },
+      { name: 'CreateUploadOptions', from: typesSpecifier, type: true },
+      { name: 'DirectUpload', from: typesSpecifier, type: true },
+      { name: 'CompletedPart', from: typesSpecifier, type: true },
+      { name: 'DirectUploadState', from: typesSpecifier, type: true },
+      { name: 'UseDirectUploadOptions', from: typesSpecifier, type: true },
+    ]);
+
+    addImports([
+      { name: 'useDirectUpload', from: resolver.resolve('./runtime/composables/direct-upload') },
     ]);
 
     // -------------------------------------------------------

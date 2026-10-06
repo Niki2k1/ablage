@@ -46,6 +46,21 @@
       </button>
     </div>
 
+    <div style="margin-top: 2rem; padding: 1rem; border: 1px solid #ccc">
+      <h2>Direct upload (S3, needs NUXT_S3_*)</h2>
+      <input type="file" multiple @change="onDirectFilesSelect" >
+      <ul>
+        <li v-for="item in Object.values(direct.items)" :key="item.file.name">
+          {{ item.file.name }} — {{ item.progress.toFixed(0) }}%
+          <span v-if="item.error" style="color: red">{{ item.error }}
+            <button @click="direct.retry(item.file)">Retry</button>
+          </span>
+          <span v-else-if="item.complete" style="color: green">stored as {{ item.result?.id }}</span>
+          <button @click="direct.remove(item.file)">✕</button>
+        </li>
+      </ul>
+    </div>
+
     <div style="margin-top: 2rem">
       <button @click="listFiles">
         List files in "{{ groupId }}"
@@ -102,6 +117,21 @@ async function listFiles() {
 }
 
 const tus = useTusUpload({ cleanupOnPageHide: true });
+
+const direct = useDirectUpload<{ id: string }>({
+  start: (file) => $fetch('/api/direct/start', {
+    method: 'POST',
+    body: { group: groupId.value, name: file.name, type: file.type, size: file.size },
+  }),
+  complete: '/api/direct/complete',
+  abort: '/api/direct/abort',
+  onSuccess: () => listFiles(),
+});
+
+function onDirectFilesSelect(e: Event) {
+  const input = e.target as HTMLInputElement;
+  direct.add(Array.from(input.files ?? []));
+}
 
 function onTusFilesSelect(e: Event) {
   const input = e.target as HTMLInputElement;

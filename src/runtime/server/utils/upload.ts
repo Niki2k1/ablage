@@ -48,7 +48,7 @@ export function parseSize(size: number | string): number {
   return Math.floor(Number(match[1]) * UNITS[match[2]!]!);
 }
 
-function formatSize(bytes: number): string {
+export function formatSize(bytes: number): string {
   for (const unit of ['GB', 'MB', 'KB'] as const) {
     if (bytes >= UNITS[unit]! && bytes % UNITS[unit]! === 0) return `${bytes / UNITS[unit]!} ${unit}`;
   }

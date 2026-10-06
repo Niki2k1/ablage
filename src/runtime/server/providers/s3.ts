@@ -1,7 +1,15 @@
-import type { ByteRange, FileObject, FileStorageProvider, PresignReadOptions } from '../../../runtime/types';
+import type {
+  ByteRange,
+  CompletedPart,
+  FileObject,
+  FileStorageProvider,
+  PresignReadOptions,
+  ProviderDirectUploads,
+} from '../../../runtime/types';
 import {
   applyPatch,
   bytesToStream,
+  httpError,
   serializeObject,
   streamToBytes,
 } from '../utils/objects';
@@ -27,7 +35,48 @@ export interface S3Client {
   listKeys(prefix: string, options?: { startAfter?: string }): AsyncGenerator<string, void, unknown>;
   /** Optional: a presigned GET URL for `key`. The default client has it when `publicEndpoint` is set. */
   presignGet?(key: string, options: PresignReadOptions): Promise<string>;
+  /** Optional: what the store reports for an object, without its bytes; `null` if missing. */
+  stat?(key: string): Promise<S3ObjectStat | null>;
+  /** Optional: presigned writes for direct uploads. The default client has them when `publicEndpoint` is set. */
+  uploads?: S3UploadClient;
 }
+
+export interface S3ObjectStat {
+  size: number;
+  /** The object's ETag, without quotes. */
+  etag: string;
+  contentType?: string;
+  /** `x-amz-meta-*` headers, keyed without the prefix. */
+  metadata: Record<string, string>;
+}
+
+/** Presigned PUTs and multipart uploads, signed for `publicEndpoint`. */
+export interface S3UploadClient {
+  /** A presigned PUT; `headers` must be sent as-is, and `contentLength` is enforced. */
+  presignPut(key: string, options: {
+    expiresIn: number;
+    contentType: string;
+    contentLength: number;
+    metadata?: Record<string, string>;
+  }): Promise<{ url: string; headers: Record<string, string> }>;
+  /** CreateMultipartUpload; returns the upload id. */
+  createMultipartUpload(key: string, options: { contentType: string; metadata?: Record<string, string> }): Promise<string>;
+  /** A presigned UploadPart URL; `contentLength` is enforced. */
+  presignUploadPart(key: string, options: {
+    uploadId: string;
+    partNumber: number;
+    contentLength: number;
+    expiresIn: number;
+  }): Promise<string>;
+  completeMultipartUpload(key: string, uploadId: string, parts: CompletedPart[]): Promise<void>;
+  abortMultipartUpload(key: string, uploadId: string): Promise<void>;
+}
+
+/**
+ * `x-amz-meta-*` marker on bytes uploaded directly, so an abandoned upload
+ * (bytes without metadata) isn't mistaken for a 0.0.x file by the migration.
+ */
+const DIRECT_UPLOAD_MARKER = 'ablage-direct-upload';
 
 /** SigV4 presigned URLs can't live longer than 7 days. */
 export const MAX_PRESIGN_EXPIRES_IN = 7 * 24 * 60 * 60;
@@ -92,6 +141,7 @@ export function createS3Provider(options: S3ProviderOptions): FileStorageProvide
   const metaKey = (group: string, id: string) => `${prefix}${group}/meta/${id}`;
   const metaPrefix = (group: string) => `${prefix}${group}/meta/`;
   const canPresign = options.client ? !!options.client.presignGet : !!options.publicEndpoint;
+  const canUpload = options.client ? !!(options.client.uploads && options.client.stat) : !!options.publicEndpoint;
 
   const readObject = async (client: S3Client, key: string): Promise<FileObject | null> => {
     const body = await client.get(key);
@@ -167,6 +217,54 @@ export function createS3Provider(options: S3ProviderOptions): FileStorageProvide
     ...(canPresign
       ? { presignRead: async (ref, presignOptions) => (await getClient()).presignGet!(dataKey(ref.group, ref.id), presignOptions) }
       : {}),
+
+    ...(canUpload ? { directUploads: s3DirectUploads(getClient, dataKey, writeObject) } : {}),
+  };
+}
+
+function s3DirectUploads(
+  getClient: () => Promise<S3Client>,
+  dataKey: (group: string, id: string) => string,
+  writeObject: (client: S3Client, object: FileObject) => Promise<void>,
+): ProviderDirectUploads {
+  const metadata = { [DIRECT_UPLOAD_MARKER]: '1' };
+  return {
+    async create(ref, { size, contentType, expiresIn, partSize }) {
+      const uploads = (await getClient()).uploads!;
+      const key = dataKey(ref.group, ref.id);
+      if (size <= partSize) {
+        const { url, headers } = await uploads.presignPut(key, { expiresIn, contentType, contentLength: size, metadata });
+        return { type: 'single', method: 'PUT', url, headers };
+      }
+      const uploadId = await uploads.createMultipartUpload(key, { contentType, metadata });
+      const count = Math.ceil(size / partSize);
+      const parts = await Promise.all(Array.from({ length: count }, async (_, index) => {
+        const partNumber = index + 1;
+        const contentLength = Math.min(partSize, size - index * partSize);
+        const url = await uploads.presignUploadPart(key, { uploadId, partNumber, contentLength, expiresIn });
+        return { number: partNumber, url, size: contentLength };
+      }));
+      return { type: 'multipart', uploadId, partSize, parts };
+    },
+
+    async finish(ref, { uploadId, parts }) {
+      const client = await getClient();
+      const key = dataKey(ref.group, ref.id);
+      if (uploadId) await client.uploads!.completeMultipartUpload(key, uploadId, parts ?? []);
+      const stat = await client.stat!(key);
+      return stat && { size: stat.size, etag: stat.etag };
+    },
+
+    async commit(object) {
+      await writeObject(await getClient(), object);
+    },
+
+    async abort(ref, { uploadId }) {
+      const client = await getClient();
+      const key = dataKey(ref.group, ref.id);
+      if (uploadId) await client.uploads!.abortMultipartUpload(key, uploadId);
+      else await client.delete(key);
+    },
   };
 }
 
@@ -205,6 +303,11 @@ export async function migrateS3Metadata(options: S3ProviderOptions): Promise<Mig
       result.skipped++;
       return;
     }
+    if (!parsed && (await client.stat?.(dataKey))?.metadata[DIRECT_UPLOAD_MARKER]) {
+      // An unfinished direct upload, not a 0.0.x file.
+      result.skipped++;
+      return;
+    }
     const dataBody = await client.get(dataKey);
     if (!dataBody) return;
     const object = await legacyToObject(ref, parsed?.legacy, await streamToBytes(dataBody));
@@ -231,8 +334,18 @@ export function createS3Client(
     async *listKeys(keyPrefix, listOptions) {
       yield* (await getClient()).listKeys(keyPrefix, listOptions);
     },
+    stat: async (key) => (await getClient()).stat!(key),
     ...(options.publicEndpoint
-      ? { presignGet: async (key: string, presignOptions: PresignReadOptions) => (await getClient()).presignGet!(key, presignOptions) }
+      ? {
+          presignGet: async (key: string, presignOptions: PresignReadOptions) => (await getClient()).presignGet!(key, presignOptions),
+          uploads: {
+            presignPut: async (key, putOptions) => (await getClient()).uploads!.presignPut(key, putOptions),
+            createMultipartUpload: async (key, createOptions) => (await getClient()).uploads!.createMultipartUpload(key, createOptions),
+            presignUploadPart: async (key, partOptions) => (await getClient()).uploads!.presignUploadPart(key, partOptions),
+            completeMultipartUpload: async (key, uploadId, parts) => (await getClient()).uploads!.completeMultipartUpload(key, uploadId, parts),
+            abortMultipartUpload: async (key, uploadId) => (await getClient()).uploads!.abortMultipartUpload(key, uploadId),
+          } satisfies S3UploadClient,
+        }
       : {}),
   };
 }
@@ -268,6 +381,32 @@ async function createAwsS3Client(options: S3ProviderOptions): Promise<S3Client> 
 
   const signedFetch = (url: string, init?: RequestInit) =>
     aws.sign(url, init).then((req) => fetch(req));
+
+  const presign = async (key: string, { method, expiresIn, query = {}, headers }: {
+    method: string;
+    expiresIn: number;
+    query?: Record<string, string>;
+    headers?: Record<string, string>;
+  }) => {
+    if (expiresIn > MAX_PRESIGN_EXPIRES_IN) {
+      throw new Error(`[ablage] S3 presigned URLs expire after at most ${MAX_PRESIGN_EXPIRES_IN} seconds (7 days); got expiresIn: ${expiresIn}`);
+    }
+    const url = new URL(`${bucketUrl(options.publicEndpoint!)}/${keyPath(key)}`);
+    url.searchParams.set('X-Amz-Expires', String(expiresIn));
+    for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);
+    // allHeaders: content-length and content-type are signed too, so the
+    // store rejects bytes other than the ones declared.
+    const signed = new URL((await aws.sign(url.toString(), { method, headers, aws: { signQuery: true, allHeaders: true } })).url);
+    // URLSearchParams writes spaces as `+`, which S3-compatible stores
+    // don't all decode as a space; send the RFC 3986 form that was signed.
+    signed.search = [...signed.searchParams]
+      .map((pair) => pair.map(encodeRfc3986).join('='))
+      .join('&');
+    return signed.toString();
+  };
+
+  const metaHeaders = (metadata: Record<string, string> = {}) =>
+    Object.fromEntries(Object.entries(metadata).map(([name, value]) => [`x-amz-meta-${name}`, value]));
 
   return {
     async put(key, body, contentType) {
@@ -332,25 +471,85 @@ async function createAwsS3Client(options: S3ProviderOptions): Promise<S3Client> 
           matchTag(xml, 'IsTruncated') === 'true' ? matchTag(xml, 'NextContinuationToken') : undefined;
       } while (token);
     },
+    async stat(key) {
+      const res = await signedFetch(objectUrl(key), { method: 'HEAD' });
+      if (res.status === 404) return null;
+      if (!res.ok) {
+        throw new Error(`[ablage] S3 HEAD ${key}: ${res.status} ${res.statusText}`);
+      }
+      const metadata: Record<string, string> = {};
+      res.headers.forEach((value, name) => {
+        if (name.startsWith('x-amz-meta-')) metadata[name.slice('x-amz-meta-'.length)] = value;
+      });
+      return {
+        size: Number(res.headers.get('content-length') ?? 0),
+        etag: (res.headers.get('etag') ?? '').replace(/^(W\/)?"|"$/g, ''),
+        contentType: res.headers.get('content-type') ?? undefined,
+        metadata,
+      };
+    },
     ...(options.publicEndpoint
       ? {
-          async presignGet(key: string, { expiresIn, responseHeaders }: PresignReadOptions) {
-            if (expiresIn > MAX_PRESIGN_EXPIRES_IN) {
-              throw new Error(`[ablage] S3 presigned URLs expire after at most ${MAX_PRESIGN_EXPIRES_IN} seconds (7 days); got expiresIn: ${expiresIn}`);
-            }
-            const url = new URL(`${bucketUrl(options.publicEndpoint!)}/${keyPath(key)}`);
-            url.searchParams.set('X-Amz-Expires', String(expiresIn));
-            for (const [name, value] of Object.entries(responseHeaders)) {
-              url.searchParams.set(`response-${name}`, value);
-            }
-            const signed = new URL((await aws.sign(url.toString(), { method: 'GET', aws: { signQuery: true } })).url);
-            // URLSearchParams writes spaces as `+`, which S3-compatible stores
-            // don't all decode as a space; send the RFC 3986 form that was signed.
-            signed.search = [...signed.searchParams]
-              .map((pair) => pair.map(encodeRfc3986).join('='))
-              .join('&');
-            return signed.toString();
-          },
+          presignGet: (key: string, { expiresIn, responseHeaders }: PresignReadOptions) =>
+            presign(key, {
+              method: 'GET',
+              expiresIn,
+              query: Object.fromEntries(Object.entries(responseHeaders).map(([name, value]) => [`response-${name}`, value])),
+            }),
+          uploads: {
+            async presignPut(key, { expiresIn, contentType, contentLength, metadata }) {
+              const headers = { 'content-type': contentType, ...metaHeaders(metadata) };
+              const url = await presign(key, {
+                method: 'PUT',
+                expiresIn,
+                headers: { ...headers, 'content-length': String(contentLength) },
+              });
+              // Browsers set content-length themselves and refuse it as a header.
+              return { url, headers };
+            },
+            async createMultipartUpload(key, { contentType, metadata }) {
+              const res = await signedFetch(`${objectUrl(key)}?uploads=`, {
+                method: 'POST',
+                headers: { 'content-type': contentType, ...metaHeaders(metadata) },
+              });
+              const xml = await res.text();
+              const uploadId = res.ok ? matchTag(xml, 'UploadId') : undefined;
+              if (!uploadId) {
+                throw new Error(`[ablage] S3 CreateMultipartUpload ${key}: ${res.status} ${res.statusText}`);
+              }
+              return decodeXml(uploadId);
+            },
+            presignUploadPart: (key, { uploadId, partNumber, contentLength, expiresIn }) =>
+              presign(key, {
+                method: 'PUT',
+                expiresIn,
+                query: { partNumber: String(partNumber), uploadId },
+                headers: { 'content-length': String(contentLength) },
+              }),
+            async completeMultipartUpload(key, uploadId, parts) {
+              const body = `<CompleteMultipartUpload>${parts
+                .map((part) => `<Part><PartNumber>${part.number}</PartNumber><ETag>${encodeXml(part.etag)}</ETag></Part>`)
+                .join('')}</CompleteMultipartUpload>`;
+              const url = new URL(objectUrl(key));
+              url.searchParams.set('uploadId', uploadId);
+              const res = await signedFetch(url.toString(), { method: 'POST', body, headers: { 'content-type': 'application/xml' } });
+              const xml = await res.text();
+              // S3 can answer 200 and still report an error in the body.
+              if (res.ok && !xml.includes('<Error>')) return;
+              const message = `S3 CompleteMultipartUpload ${key}: ${matchTag(xml, 'Code') ?? res.status} ${matchTag(xml, 'Message') ?? res.statusText}`;
+              // A 4xx means the parts don't add up (missing, wrong ETag, too small).
+              if (res.status >= 400 && res.status < 500) throw httpError(400, message);
+              throw new Error(`[ablage] ${message}`);
+            },
+            async abortMultipartUpload(key, uploadId) {
+              const url = new URL(objectUrl(key));
+              url.searchParams.set('uploadId', uploadId);
+              const res = await signedFetch(url.toString(), { method: 'DELETE' });
+              if (!res.ok && res.status !== 404) {
+                throw new Error(`[ablage] S3 AbortMultipartUpload ${key}: ${res.status} ${res.statusText}`);
+              }
+            },
+          } satisfies S3UploadClient,
         }
       : {}),
   };
@@ -370,6 +569,10 @@ function parseListKeys(xml: string): string[] {
 
 function matchTag(xml: string, tag: string): string | undefined {
   return xml.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`))?.[1];
+}
+
+function encodeXml(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function decodeXml(value: string): string {

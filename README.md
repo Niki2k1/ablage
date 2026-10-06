@@ -21,7 +21,7 @@ Requires Nuxt ≥ 4.6 and Node ≥ 22.
 - **Providers** — local filesystem (default), S3 / Cloudflare R2 / MinIO, Drizzle (metadata in your database, bytes in a blob store), or your own
 - **Serving** — `sendStoredFile()` streams files with `etag`/`last-modified` revalidation, `Range` requests and HEAD; `signedUrl()` creates expiring links without a route of your own
 - **Images** — `@nuxt/image` provider with on-request transforms (IPX, or an external imgproxy / IPX service), upload-time transforms, and image + PDF thumbnails
-- **Uploads** — `readUploadedFile()` validation helper, and resumable [tus](https://tus.io) uploads
+- **Uploads** — `readUploadedFile()` validation helper, resumable [tus](https://tus.io) uploads, and direct-to-S3 uploads (presigned, multipart) that never pass through the app server
 - **Portable** — server routes run on `nuxt/server`, ready for Nuxt 5
 
 ## Setup
@@ -388,6 +388,93 @@ A `POST <route>/cleanup` sub-route accepts `{ tusIds: string[] }` from
 `navigator.sendBeacon` (used by `cleanupOnPageHide`). Staging uses the local
 filesystem, independent of the storage provider.
 
+## Direct uploads (S3)
+
+With the S3 provider and a `publicEndpoint`, the browser can upload straight to
+the bucket through presigned URLs, so the app server never holds the bytes.
+That suits large files and video, and runtimes without a writable disk or with
+tight memory limits, where tus can't stage uploads. Files up to the part size
+go up with one `PUT`; larger ones as a multipart upload, in parallel parts.
+
+Your own routes start and finish each upload, so you keep control of access
+and validation:
+
+```ts
+// server/api/uploads/start.post.ts
+export default defineEventHandler(async (event) => {
+  const { name, type, size } = await readBody(event)
+  return useFileStorage().createUpload('videos', {
+    name,
+    contentType: type,
+    size,                       // exact; the store rejects any other length
+    maxSize: '2GB',             // 413 before anything is signed
+    types: ['video', 'image'],  // 415 otherwise
+    customMetadata: { userId: event.context.user.id },
+    // expiresIn: 3600,         // lifetime of the URLs, in seconds
+    // partSize: 16 * 1024 * 1024,
+  })
+})
+
+// server/api/uploads/complete.post.ts
+export default defineEventHandler(async (event) => {
+  const { token, parts } = await readBody(event)
+  return useFileStorage().completeUpload(token, { parts })
+})
+
+// server/api/uploads/abort.post.ts
+export default defineEventHandler(async (event) => {
+  await useFileStorage().abortUpload((await readBody(event)).token)
+  return null
+})
+```
+
+```vue
+<script setup lang="ts">
+const uploads = useDirectUpload({
+  start: '/api/uploads/start',        // POSTed { name, type, size }
+  complete: '/api/uploads/complete',  // POSTed { token, parts }
+  abort: '/api/uploads/abort',        // POSTed { token }
+  // concurrency: 4, retryDelays: [0, 1000, 3000, 5000]
+})
+</script>
+
+<template>
+  <input type="file" multiple @change="uploads.add([...($event.target as HTMLInputElement).files!])">
+  <div v-for="item in uploads.items" :key="item.file.name">
+    {{ item.file.name }}: {{ item.progress.toFixed(0) }}%
+    <button v-if="item.error" @click="uploads.retry(item.file)">Retry</button>
+  </div>
+</template>
+```
+
+`start`, `complete` and `abort` also take functions, e.g. to add a group from
+your UI. `retry()` (also run when the browser comes back online) re-sends only
+the parts that didn't finish; once the URLs have expired it starts over.
+
+- **The token** returned by `createUpload()` is signed and carries the declared
+  group, id, name, type and size, so the client can't change them between start
+  and finish. `completeUpload()` checks the stored size and only then writes the
+  metadata: nothing shows up in `list()` before that.
+- **`etag`** of a directly uploaded file is the store's ETag, not a SHA-256.
+- **No overwrites**: an explicit `id` must be free (409), because the upload
+  would replace the bytes before it completes.
+- **Bucket CORS** must allow `PUT` from your origin with the `content-type` and
+  `x-amz-meta-*` headers, and expose `ETag` for multipart uploads:
+
+  ```json
+  [{
+    "AllowedOrigins": ["https://app.example.com"],
+    "AllowedMethods": ["GET", "PUT"],
+    "AllowedHeaders": ["*"],
+    "ExposeHeaders": ["ETag"]
+  }]
+  ```
+- **Abandoned uploads** leave bytes without metadata (never listed) or
+  unfinished multipart uploads. Add a lifecycle rule that aborts incomplete
+  multipart uploads after a day. Directly uploaded bytes carry
+  `x-amz-meta-ablage-direct-upload`, so `migrateS3Metadata()` doesn't adopt
+  them as files.
+
 ## Providers
 
 A provider persists bytes and metadata. The default `unstorage` provider uses the
@@ -438,6 +525,8 @@ app talks to `http://garage:3900` internally. The link sets `content-type`,
   don't accept presigned URLs; use the `r2.cloudflarestorage.com` endpoint.
 - A Drizzle provider whose `blobs` is `createS3Client({ ..., publicEndpoint })`
   presigns the same way.
+
+`publicEndpoint` also enables [direct uploads](#direct-uploads-s3).
 
 ### Drizzle (metadata in your database)
 
@@ -504,6 +593,10 @@ interface FileStorageProvider {
   list(group: string, options: { limit: number, cursor?: string, prefix?: string }): Promise<ListResult>
   /** Optional: the first file whose customMetadata[key] === value. */
   findByMeta?(filter: { key: string, value: unknown, group?: string }): Promise<FileObject | null>
+  /** Optional: a URL serving the bytes straight from the store (signedUrl()). */
+  presignRead?(ref: FileRef, options: PresignReadOptions): Promise<string>
+  /** Optional: browser-to-store uploads (createUpload()); see ProviderDirectUploads. */
+  directUploads?: ProviderDirectUploads
 }
 ```
 
