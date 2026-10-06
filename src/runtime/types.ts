@@ -15,7 +15,10 @@ export interface FileObject<M extends CustomMetadata = CustomMetadata> extends F
   size: number;
   /** MIME type, e.g. `image/webp`. Default: `application/octet-stream`. */
   contentType: string;
-  /** Content hash (SHA-256, base64url). Changes only when the bytes change. */
+  /**
+   * Changes only when the bytes change. A SHA-256 (base64url) for files
+   * written by `put()`; the store's own ETag for direct uploads.
+   */
   etag: string;
   /** When these bytes were written. */
   uploadedAt: Date;
@@ -188,10 +191,116 @@ export interface UseTusUploadOptions {
   onSuccess?: (file: File, state: TusUploadState) => void;
 }
 
+/** Reactive state of a single file tracked by `useDirectUpload()`. */
+export interface DirectUploadState<R = unknown> {
+  file: File;
+  /** Upload progress in percent (0-100). */
+  progress: number;
+  /** True once the upload was completed on the server. */
+  complete: boolean;
+  /** What your `complete` route returned. */
+  result?: R;
+  /** Message of the last error, if any. `retry()` continues where it stopped. */
+  error?: string;
+}
+
+export interface UseDirectUploadOptions<R = unknown> {
+  /**
+   * Starts an upload: your route that calls `useFileStorage().createUpload()`
+   * and returns its result. A URL is POSTed `{ name, type, size }` as JSON.
+   */
+  start: string | ((file: File) => Promise<DirectUpload>);
+  /**
+   * Finishes an upload: your route that calls `completeUpload(token, { parts })`.
+   * A URL is POSTed `{ token, parts }` as JSON.
+   */
+  complete: string | ((input: { token: string; parts?: CompletedPart[] }, file: File) => Promise<R>);
+  /** Cancels an upload via `abortUpload(token)`. A URL is POSTed `{ token }`. */
+  abort?: string | ((input: { token: string }, file: File) => Promise<unknown>);
+  /** Parts uploaded in parallel. Default: 4. */
+  concurrency?: number;
+  /** Retry backoff in ms for each PUT. Default: `[0, 1000, 3000, 5000]`. */
+  retryDelays?: number[];
+  onError?: (file: File, error: Error) => void;
+  onSuccess?: (file: File, state: DirectUploadState<R>) => void;
+}
+
 /** Options for `useTusStaging().promote()`. */
 export interface TusPromoteOptions extends Pick<PutOptions, 'id' | 'overwrite' | 'contentType' | 'name' | 'cacheControl' | 'customMetadata' | 'transform'> {
   /** Remove the staged upload after promoting it. Default: `true`. */
   removeStaged?: boolean;
+}
+
+/** Options for `useFileStorage().createUpload()`. */
+export interface CreateUploadOptions<M extends CustomMetadata = CustomMetadata>
+  extends Pick<PutOptions<M>, 'id' | 'name' | 'cacheControl' | 'customMetadata'> {
+  /** Exact size in bytes; the store rejects bytes of any other length. */
+  size: number;
+  /** Default: `application/octet-stream`. */
+  contentType?: string;
+  /** Reject (413) before anything is signed. Bytes or `'500KB'` / `'2MB'` / `'1GB'`. */
+  maxSize?: number | string;
+  /** Accepted types (415 otherwise): MIME types, families like `'image'`, or extensions like `'.pdf'`. */
+  types?: string[];
+  /** Lifetime of the upload URLs in seconds. Default: 3600. */
+  expiresIn?: number;
+  /** Part size for multipart uploads; files up to this size use a single PUT. Default: 16 MiB, at least 5 MiB. */
+  partSize?: number;
+}
+
+/** One presigned part of a multipart upload. */
+export interface DirectUploadPart {
+  /** 1-based part number. */
+  number: number;
+  url: string;
+  /** Bytes of the file this part covers, starting at `(number - 1) * partSize`. */
+  size: number;
+}
+
+/** Where a provider wants the bytes of a direct upload sent. */
+export type DirectUploadTarget =
+  | {
+    type: 'single';
+    method: 'PUT';
+    url: string;
+    /** Headers to send with the PUT. They are part of the signature. */
+    headers: Record<string, string>;
+  }
+  | {
+    type: 'multipart';
+    uploadId: string;
+    partSize: number;
+    parts: DirectUploadPart[];
+  };
+
+/** Returned by `createUpload()`: send it to the browser as-is. */
+export type DirectUpload = DirectUploadTarget & FileRef & {
+  /** Pass to `completeUpload()` / `abortUpload()`. Signed; carries the declared name, type and size. */
+  token: string;
+  /** When the upload URLs stop working (ISO 8601). */
+  expiresAt: string;
+};
+
+/** A finished part of a multipart upload, as reported by the store. */
+export interface CompletedPart {
+  number: number;
+  /** The part's `ETag` response header (the bucket's CORS config must expose it). */
+  etag: string;
+}
+
+/** Direct-to-store uploads, offered by providers that can presign writes. */
+export interface ProviderDirectUploads {
+  /** Presign a single PUT or start a multipart upload for the ref's bytes. */
+  create(ref: FileRef, options: { size: number; contentType: string; expiresIn: number; partSize: number }): Promise<DirectUploadTarget>;
+  /**
+   * Finish the transfer (e.g. CompleteMultipartUpload) and report the stored
+   * bytes; `null` if they aren't there.
+   */
+  finish(ref: FileRef, options: { uploadId?: string; parts?: CompletedPart[] }): Promise<{ size: number; etag: string } | null>;
+  /** Store metadata for bytes that were uploaded directly. */
+  commit(object: FileObject): Promise<void>;
+  /** Drop an unfinished upload's bytes or parts. */
+  abort(ref: FileRef, options: { uploadId?: string }): Promise<void>;
 }
 
 /** Options for a provider's `presignRead()`. */
@@ -237,4 +346,6 @@ export interface FileStorageProvider {
    * instead of a link to the module's file route.
    */
   presignRead?(ref: FileRef, options: PresignReadOptions): Promise<string>;
+  /** Optional: uploads straight from the browser to the store (`createUpload()`). */
+  directUploads?: ProviderDirectUploads;
 }

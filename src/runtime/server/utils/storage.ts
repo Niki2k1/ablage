@@ -1,6 +1,9 @@
 import type {
   ImageTransformOptions,
+  CompletedPart,
+  CreateUploadOptions,
   CustomMetadata,
+  DirectUpload,
   FileBody,
   FileMetaPatch,
   FileObject,
@@ -18,6 +21,7 @@ import { useFileStorageProvider } from '../provider';
 import { stringifyModifiers, transformToModifiers, type ImageModifiers } from './image-service';
 import { refPath, signFileClaims } from './signing';
 import { contentDisposition } from './send';
+import { directUploadApi } from './direct-upload';
 import { transformImage } from './image';
 import { transformWithService, useImageService } from './image-service-runtime';
 import {
@@ -32,7 +36,10 @@ import {
 } from './objects';
 
 export type {
+  CompletedPart,
+  CreateUploadOptions,
   CustomMetadata,
+  DirectUpload,
   FileBody,
   FileMetaPatch,
   FileObject,
@@ -271,5 +278,5 @@ export function useFileStorage() {
     return `${fileRoute}/${refPath(normalized)}?${query}`;
   }
 
-  return { head, get, put, updateMeta, remove, list, listAll, clear, findByMeta, url, signedUrl };
+  return { head, get, put, updateMeta, remove, list, listAll, clear, findByMeta, url, signedUrl, ...directUploadApi(provider) };
 }

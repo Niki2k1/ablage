@@ -48,6 +48,30 @@ export async function verifyFileClaims(
   return safeEqual(await signFileClaims(key, claims), signature);
 }
 
+/**
+ * A signed, tamper-proof token carrying `claims` (readable, not secret):
+ * `<base64url JSON>.<HMAC>`. Expires at `claims.expires` (Unix seconds).
+ */
+export async function signToken(key: string, claims: { expires: number }): Promise<string> {
+  const body = base64url(encoder.encode(JSON.stringify(claims)));
+  return `${body}.${await hmac(key, body)}`;
+}
+
+/** The claims of a token from {@link signToken}, or `null` if it's invalid or expired. */
+export async function verifyToken<T extends { expires: number }>(key: string, token: string, now = Date.now()): Promise<T | null> {
+  const [body, signature] = token.split('.');
+  if (!body || !signature || !safeEqual(await hmac(key, body), signature)) return null;
+  let claims: T;
+  try {
+    const binary = atob(body.replace(/-/g, '+').replace(/_/g, '/'));
+    claims = JSON.parse(new TextDecoder().decode(Uint8Array.from(binary, (c) => c.charCodeAt(0))));
+  }
+  catch {
+    return null;
+  }
+  return Number.isFinite(claims?.expires) && claims.expires * 1000 > now ? claims : null;
+}
+
 /** `group` path segments and the id, each URL-encoded. */
 export function refPath(ref: FileRef): string {
   return [...ref.group.split('/'), ref.id].map(encodeURIComponent).join('/');

@@ -235,6 +235,70 @@ describe('aws4fetch S3 client', () => {
     await expect(s3.presignGet!('x', { expiresIn: 7 * 24 * 3600 + 1, responseHeaders })).rejects.toThrow(/at most 604800 seconds/)
   })
 
+  const uploadClient = () => createS3Client({
+    accessKeyId: 'k',
+    secretAccessKey: 's',
+    endpoint: 'http://garage:3900',
+    publicEndpoint: 'https://s3.example.com',
+    bucket: 'bucket',
+  })
+
+  it('signs content-length into presigned PUTs but leaves it to the browser', async () => {
+    const s3 = uploadClient()
+    const { url, headers } = await s3.uploads!.presignPut('g/data/a', {
+      expiresIn: 60,
+      contentType: 'video/mp4',
+      contentLength: 42,
+      metadata: { 'ablage-direct-upload': '1' },
+    })
+    expect(headers).toEqual({ 'content-type': 'video/mp4', 'x-amz-meta-ablage-direct-upload': '1' })
+    expect(new URL(url).searchParams.get('X-Amz-SignedHeaders')).toBe('content-length;content-type;host;x-amz-meta-ablage-direct-upload')
+
+    const part = new URL(await s3.uploads!.presignUploadPart('g/data/a', { uploadId: 'U 1', partNumber: 2, contentLength: 5, expiresIn: 60 }))
+    expect(part.host).toBe('s3.example.com')
+    expect([part.searchParams.get('partNumber'), part.searchParams.get('uploadId')]).toEqual(['2', 'U 1'])
+    expect(part.searchParams.get('X-Amz-SignedHeaders')).toBe('content-length;host')
+  })
+
+  it('creates, completes and aborts multipart uploads on the internal endpoint', async () => {
+    const requests: { method: string, url: URL, body: string, headers: Headers }[] = []
+    let completeResponse = new Response('<CompleteMultipartUploadResult/>')
+    vi.stubGlobal('fetch', vi.fn(async (req: Request) => {
+      const url = new URL(req.url)
+      requests.push({ method: req.method, url, body: await req.text(), headers: req.headers })
+      if (url.searchParams.has('uploads')) return new Response('<InitiateMultipartUploadResult><UploadId>abc&amp;1</UploadId></InitiateMultipartUploadResult>')
+      if (req.method === 'POST') return completeResponse
+      return new Response(null, { status: 404 })
+    }))
+
+    const s3 = uploadClient()
+    expect(await s3.uploads!.createMultipartUpload('g/data/a', { contentType: 'video/mp4', metadata: { m: '1' } })).toBe('abc&1')
+    expect(requests[0]!.url.origin).toBe('http://garage:3900')
+    expect(requests[0]!.headers.get('x-amz-meta-m')).toBe('1')
+
+    await s3.uploads!.completeMultipartUpload('g/data/a', 'abc&1', [{ number: 1, etag: '"e1"' }, { number: 2, etag: '"e2"' }])
+    expect(requests[1]!.url.searchParams.get('uploadId')).toBe('abc&1')
+    expect(requests[1]!.body).toBe('<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"e1"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>"e2"</ETag></Part></CompleteMultipartUpload>')
+
+    completeResponse = new Response('<Error><Code>InternalError</Code><Message>try again</Message></Error>')
+    await expect(s3.uploads!.completeMultipartUpload('g/data/a', 'abc&1', [])).rejects.toThrow(/InternalError try again/)
+    completeResponse = new Response('<Error><Code>InvalidPart</Code><Message>bad</Message></Error>', { status: 400 })
+    await expect(s3.uploads!.completeMultipartUpload('g/data/a', 'abc&1', [])).rejects.toMatchObject({ statusCode: 400 })
+
+    await s3.uploads!.abortMultipartUpload('g/data/a', 'abc&1')
+    expect(requests.at(-1)!.method).toBe('DELETE')
+  })
+
+  it('stats objects with their ETag and user metadata', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (req: Request) => req.url.endsWith('/missing')
+      ? new Response(null, { status: 404 })
+      : new Response(null, { headers: { 'content-length': '7', 'etag': '"abc-2"', 'x-amz-meta-ablage-direct-upload': '1' } })))
+    const s3 = client()
+    expect(await s3.stat!('g/data/a')).toEqual({ size: 7, etag: 'abc-2', contentType: undefined, metadata: { 'ablage-direct-upload': '1' } })
+    expect(await s3.stat!('g/data/missing')).toBeNull()
+    expect(client().uploads).toBeUndefined()
+  })
+
   it('reports a missing dependency or option clearly', async () => {
     await expect(createS3Client({ accessKeyId: 'k' }).head('x')).rejects.toThrow(/missing required option "secretAccessKey"/)
   })
