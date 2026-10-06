@@ -1,5 +1,4 @@
 import { createError } from 'h3';
-import { defu } from 'defu';
 import { consola } from 'consola';
 import {
   Server,
@@ -10,7 +9,7 @@ import {
 import { FileStore } from '@tus/file-store';
 // @ts-expect-error virtual module injected by the module
 import { tusRoute, tusStagingDir, tusMaxSize, tusExpiration } from '#ablage-tus';
-import type { FileMeta, TusPromoteOptions } from '../../../runtime/types';
+import type { FileObject, TusPromoteOptions } from '../../../runtime/types';
 import { useFileStorage } from './storage';
 
 export type { TusPromoteOptions };
@@ -139,13 +138,14 @@ export function useTusStaging() {
 
   /**
    * Move a completed staged upload into the file storage and (by default)
-   * delete the staged copy. Returns the stored file's id and resolved meta.
+   * delete the staged copy. Returns the stored file. `name` and `contentType`
+   * fall back to the upload's tus metadata (`filename`, `filetype`).
    */
   async function promote(
     tusId: string,
-    groupId: string,
+    group: string,
     options: TusPromoteOptions = {}
-  ): Promise<{ id: string; meta: FileMeta }> {
+  ): Promise<FileObject> {
     const upload = await info(tusId);
     if (!upload) {
       throw createError({
@@ -169,23 +169,18 @@ export function useTusStaging() {
     }
 
     const tusMeta = upload.metadata ?? {};
-    const meta = defu(options.meta ?? {}, {
-      name: tusMeta.filename ?? tusId,
-      mime: tusMeta.filetype ?? 'application/octet-stream',
-      type: '',
-      version: 1,
-    }) as FileMeta;
-
-    const id = await useFileStorage().upload(groupId, data, {
-      meta,
-      transform: options.transform,
+    const { removeStaged, ...putOptions } = options;
+    const file = await useFileStorage().put(group, data, {
+      ...putOptions,
+      name: options.name ?? tusMeta.filename ?? undefined,
+      contentType: options.contentType ?? tusMeta.filetype ?? undefined,
     });
 
-    if (options.removeStaged !== false) {
+    if (removeStaged !== false) {
       await remove(tusId);
     }
 
-    return { id, meta };
+    return file;
   }
 
   return { info, read, remove, promote };
