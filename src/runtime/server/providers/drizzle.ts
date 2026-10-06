@@ -1,11 +1,12 @@
-import { randomUUID } from 'node:crypto';
 import { useStorage } from 'nitropack/runtime';
 import type { Table } from 'drizzle-orm';
 import type {
+  ByteRange,
+  FileObject,
+  FileRef,
   FileStorageProvider,
-  FileMeta,
-  StoredFile,
 } from '../../../runtime/types';
+import { applyPatch, computeEtag, rangeStream } from '../utils/objects';
 
 /**
  * Where the drizzle provider keeps file bytes — the database only holds
@@ -13,8 +14,9 @@ import type {
  * string is shorthand for a Nitro storage mount name.
  */
 export interface BlobStore {
-  put(key: string, body: Buffer | Uint8Array, contentType?: string): Promise<void>;
-  get(key: string): Promise<Buffer | null>;
+  put(key: string, body: Uint8Array, contentType?: string): Promise<void>;
+  /** The bytes (or a range, clamped to their size) as a stream; `null` if missing. */
+  get(key: string, range?: ByteRange): Promise<ReadableStream<Uint8Array> | null>;
   delete(key: string): Promise<void>;
 }
 
@@ -35,7 +37,10 @@ export interface DrizzleDatabase {
 export interface DrizzleProviderOptions {
   /** Your Drizzle database instance (any dialect, any async or sync driver). */
   db: DrizzleDatabase;
-  /** The table holding file metadata. */
+  /**
+   * The table holding file metadata. Ids are scoped by group, so make
+   * `(groupId, id)` the primary key (or keep explicit ids globally unique).
+   */
   table: Table;
   /**
    * Where file bytes are stored: a {@link BlobStore} (e.g. `createS3Client()`)
@@ -48,7 +53,7 @@ export interface DrizzleProviderOptions {
     id?: string;
     /** Default: `'groupId'`. */
     groupId?: string;
-    /** JSON column. Default: `'metadata'`. */
+    /** JSON column holding the file's metadata. Default: `'metadata'`. */
     metadata?: string;
     /** Set on insert when the table has it. Default: `'createdAt'`. */
     createdAt?: string;
@@ -60,26 +65,27 @@ export interface DrizzleProviderOptions {
 type Row = Record<string, unknown>;
 type DrizzleOrm = typeof import('drizzle-orm');
 
-const EMPTY_META: FileMeta = { name: '', mime: '', type: '', version: 0 };
+/** What the metadata column stores: every FileObject field except the ref. */
+type StoredMetadata = Omit<FileObject, 'group' | 'id' | 'uploadedAt' | 'updatedAt'> & {
+  uploadedAt: string;
+  updatedAt: string;
+};
 
-function asMeta(value: unknown): FileMeta {
+function parseJson(value: unknown): Record<string, unknown> | null {
   if (typeof value === 'string') {
     try {
       value = JSON.parse(value);
-    } catch {
-      return { ...EMPTY_META };
+    }
+    catch {
+      return null;
     }
   }
-  return value && typeof value === 'object' ? (value as FileMeta) : { ...EMPTY_META };
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
 }
 
-function asDate(value: unknown): Date | undefined {
-  if (value instanceof Date) return value;
-  if (typeof value === 'string' || typeof value === 'number') {
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? undefined : date;
-  }
-  return undefined;
+function toStored(object: FileObject): StoredMetadata {
+  const { group: _group, id: _id, uploadedAt, updatedAt, ...rest } = object;
+  return { ...rest, uploadedAt: uploadedAt.toISOString(), updatedAt: updatedAt.toISOString() };
 }
 
 /** Map a Nitro storage mount onto {@link BlobStore}, refusing unmounted names. */
@@ -98,8 +104,9 @@ function storageBlobStore(name: string): BlobStore {
     async put(key, body) {
       await storage().setItemRaw(key, body);
     },
-    async get(key) {
-      return (await storage().getItemRaw<Buffer>(key)) ?? null;
+    async get(key, range) {
+      const data = await storage().getItemRaw<Uint8Array>(key);
+      return data ? rangeStream(new Uint8Array(data), range) : null;
     },
     async delete(key) {
       await storage().removeItem(key);
@@ -160,173 +167,174 @@ function bindTable(table: Table, columnNames: DrizzleProviderOptions['columns'],
 
 // Same layout as the unstorage (`group:data:id`) and S3 (`group/data/id`)
 // providers, so switching metadata to a database keeps existing bytes.
-const seg = (value: string) => value.replace(/^\/+|\/+$/g, '');
-const blobKey = (groupId: string, id: string) => `${seg(groupId)}/data/${seg(id)}`;
+const blobKey = (group: string, id: string) => `${group}/data/${id}`;
 
 /**
  * Drizzle-backed {@link FileStorageProvider}: metadata lives in a database
  * table, bytes in a {@link BlobStore}. Uses only Drizzle's core query builder,
  * which is unchanged between v0.x and v1.
  *
- * When the metadata column is Postgres `jsonb`, `findByMeta` and `update` run
- * in the database (`@>` containment / `||` merge); other dialects filter and
- * merge in JS.
+ * When the metadata column is Postgres `jsonb`, `findByMeta` and `updateMeta`
+ * run in the database (`@>` containment / `||` merge); other dialects filter
+ * and merge in JS.
  */
 export function createDrizzleProvider(options: DrizzleProviderOptions): FileStorageProvider {
   const { db, table } = options;
   const blobs = typeof options.blobs === 'string' ? storageBlobStore(options.blobs) : options.blobs;
   const { names, ready } = bindTable(table, options.columns, 'createDrizzleProvider');
 
-  const toStoredFile = (
-    c: Awaited<ReturnType<typeof ready>>,
-    row: Row,
-    data?: Buffer,
-  ): StoredFile => ({
-    id: String(row[names.id]),
-    groupId: String(row[names.groupId]),
-    data,
-    meta: asMeta(row[names.metadata]),
-    createdAt: c.hasCreatedAt ? asDate(row[names.createdAt]) : undefined,
-    updatedAt: c.hasUpdatedAt ? asDate(row[names.updatedAt]) : undefined,
-  });
+  type Columns = Awaited<ReturnType<typeof ready>>;
 
-  const findRow = async (id: string, groupId?: string): Promise<Row | undefined> => {
-    const c = await ready();
-    const { eq, and } = c.orm;
-    const where = groupId ? and(eq(c.id, id), eq(c.groupId, groupId)) : eq(c.id, id);
-    const rows: Row[] = await db.select().from(table).where(where).limit(1);
+  const toObject = (row: Row): FileObject | null => {
+    const stored = parseJson(row[names.metadata]) as Partial<StoredMetadata> | null;
+    if (!stored || typeof stored.size !== 'number' || typeof stored.etag !== 'string') return null;
+    return {
+      ...(stored as StoredMetadata),
+      group: String(row[names.groupId]),
+      id: String(row[names.id]),
+      customMetadata: (stored.customMetadata as FileObject['customMetadata']) ?? {},
+      uploadedAt: new Date(stored.uploadedAt!),
+      updatedAt: new Date(stored.updatedAt!),
+    };
+  };
+
+  const whereRef = (c: Columns, ref: FileRef) => c.orm.and(c.orm.eq(c.groupId, ref.group), c.orm.eq(c.id, ref.id));
+
+  const findRow = async (c: Columns, ref: FileRef): Promise<Row | undefined> => {
+    const rows: Row[] = await db.select().from(table).where(whereRef(c, ref)).limit(1);
     return rows[0];
   };
 
-  return {
-    async create(groupId, data, meta) {
-      const c = await ready();
-      const id = randomUUID();
-      const key = blobKey(groupId, id);
-      const now = new Date();
+  const timestamps = (c: Columns, object: FileObject, insert: boolean) => ({
+    ...(insert && c.hasCreatedAt ? { [names.createdAt]: object.uploadedAt } : {}),
+    ...(c.hasUpdatedAt ? { [names.updatedAt]: object.updatedAt } : {}),
+  });
 
-      await blobs.put(key, data, meta?.mime);
+  return {
+    async head(ref) {
+      const c = await ready();
+      const row = await findRow(c, ref);
+      return row ? toObject(row) : null;
+    },
+
+    read(ref, range) {
+      return blobs.get(blobKey(ref.group, ref.id), range);
+    },
+
+    async write(object, data) {
+      const c = await ready();
+      const key = blobKey(object.group, object.id);
+      const existed = !!(await findRow(c, object));
+
+      await blobs.put(key, data, object.contentType);
       try {
-        await db.insert(table).values({
-          [names.id]: id,
-          [names.groupId]: groupId,
-          [names.metadata]: meta ?? null,
-          ...(c.hasCreatedAt ? { [names.createdAt]: now } : {}),
-          ...(c.hasUpdatedAt ? { [names.updatedAt]: now } : {}),
-        });
-      } catch (error) {
-        // Don't leave unreachable bytes behind.
-        await blobs.delete(key).catch(() => {});
+        if (existed) {
+          await db
+            .update(table)
+            .set({ [names.metadata]: toStored(object), ...timestamps(c, object, false) })
+            .where(whereRef(c, object));
+        }
+        else {
+          await db.insert(table).values({
+            [names.id]: object.id,
+            [names.groupId]: object.group,
+            [names.metadata]: toStored(object),
+            ...timestamps(c, object, true),
+          });
+        }
+      }
+      catch (error) {
+        // A new file whose row failed would leave unreachable bytes behind.
+        if (!existed) await blobs.delete(key).catch(() => {});
         throw error;
       }
-      return { id };
     },
 
-    async get(groupId, id) {
+    async updateMeta(ref, patch) {
       const c = await ready();
-      const [data, row] = await Promise.all([blobs.get(blobKey(groupId, id)), findRow(id, groupId)]);
-      if (row) return toStoredFile(c, row, data ?? undefined);
-      if (!data) return null;
-      return { id, groupId, data, meta: { ...EMPTY_META } };
-    },
-
-    async head(groupId, id) {
-      const c = await ready();
-      const row = await findRow(id, groupId);
-      if (row) return toStoredFile(c, row);
-      // No row: only bytes stored without metadata (e.g. not yet imported).
-      // The blob store has no existence check, so this rare path reads them.
-      return (await blobs.get(blobKey(groupId, id))) ? { id, groupId, meta: { ...EMPTY_META } } : null;
-    },
-
-    async getData(groupId, id) {
-      return blobs.get(blobKey(groupId, id));
-    },
-
-    async getMeta(id) {
-      const row = await findRow(id);
-      return row ? asMeta(row[names.metadata]) : null;
-    },
-
-    async list(groupId) {
-      const c = await ready();
-      const rows: Row[] = await db.select().from(table).where(c.orm.eq(c.groupId, groupId));
-      return rows.map((row) => toStoredFile(c, row));
-    },
-
-    async update(id, meta) {
-      const c = await ready();
-      const { eq, sql } = c.orm;
-      const stamp = c.hasUpdatedAt ? { [names.updatedAt]: new Date() } : {};
+      const { sql } = c.orm;
+      const updatedAt = new Date();
 
       if (c.jsonb) {
-        // Merge in one statement so concurrent updates can't drop each other's keys.
+        // One statement, so concurrent updates can't drop each other's keys:
+        // replace the top-level fields, then merge customMetadata.
+        const { customMetadata = {}, ...fields } = patch;
+        const top = { ...fields, updatedAt: updatedAt.toISOString() };
         const rows: Row[] = await db
           .update(table)
           .set({
-            [names.metadata]: sql`coalesce(${c.metadata}, '{}'::jsonb) || ${JSON.stringify(meta)}::jsonb`,
-            ...stamp,
+            [names.metadata]: sql`(coalesce(${c.metadata}, '{}'::jsonb) || ${JSON.stringify(top)}::jsonb) || jsonb_build_object('customMetadata', coalesce(${c.metadata}->'customMetadata', '{}'::jsonb) || ${JSON.stringify(customMetadata)}::jsonb)`,
+            ...(c.hasUpdatedAt ? { [names.updatedAt]: updatedAt } : {}),
           })
-          .where(eq(c.id, id))
-          .returning({ id: c.id });
-        if (!rows.length) throw new Error(`File metadata not found: ${id}`);
-        return;
+          .where(whereRef(c, ref))
+          .returning();
+        return rows[0] ? toObject(rows[0]) : null;
       }
 
-      const existing = await findRow(id);
-      if (!existing) throw new Error(`File metadata not found: ${id}`);
+      const row = await findRow(c, ref);
+      const existing = row && toObject(row);
+      if (!existing) return null;
+      const updated = { ...applyPatch(existing, patch), updatedAt };
       await db
         .update(table)
-        .set({ [names.metadata]: { ...asMeta(existing[names.metadata]), ...meta }, ...stamp })
-        .where(eq(c.id, id));
+        .set({ [names.metadata]: toStored(updated), ...timestamps(c, updated, false) })
+        .where(whereRef(c, ref));
+      return updated;
     },
 
-    async remove(groupId, id) {
+    async remove(refs) {
       const c = await ready();
-      const { eq, and } = c.orm;
-      // Row first: if the blob delete then fails, the file is already gone for
-      // readers instead of listing with missing bytes.
-      await db.delete(table).where(and(eq(c.id, id), eq(c.groupId, groupId)));
-      await blobs.delete(blobKey(groupId, id));
+      // Rows first: if a blob delete then fails, the file is already gone for readers.
+      await db.delete(table).where(c.orm.or(...refs.map((ref) => whereRef(c, ref))));
+      await Promise.all(refs.map((ref) => blobs.delete(blobKey(ref.group, ref.id))));
     },
 
-    async clear(groupId) {
+    async list(group, { limit, cursor, prefix }) {
       const c = await ready();
-      const where = c.orm.eq(c.groupId, groupId);
-      const rows: Row[] = await db.select({ id: c.id }).from(table).where(where);
-      await db.delete(table).where(where);
-      await Promise.all(rows.map((row) => blobs.delete(blobKey(groupId, String(row.id)))));
+      const { and, eq, gt, asc, sql } = c.orm;
+      const conditions = [eq(c.groupId, group)];
+      if (cursor) conditions.push(gt(c.id, cursor));
+      // Ids may contain `_`, a LIKE wildcard; escape it (and `\`, `%`) explicitly.
+      if (prefix) conditions.push(sql`${c.id} like ${`${prefix.replace(/[\\%_]/g, '\\$&')}%`} escape '\\'`);
+      const rows: Row[] = await db
+        .select()
+        .from(table)
+        .where(and(...conditions))
+        .orderBy(asc(c.id))
+        .limit(limit + 1);
+      const page = rows.slice(0, limit);
+      const hasMore = rows.length > limit;
+      return {
+        objects: page.map(toObject).filter((object): object is FileObject => !!object),
+        hasMore,
+        cursor: hasMore ? String(page[page.length - 1]![names.id]) : undefined,
+      };
     },
 
-    async has(groupId, id) {
-      return !!(await findRow(id, groupId));
-    },
-
-    async findByMeta(filter) {
+    async findByMeta({ key, value, group }) {
       const c = await ready();
       const { eq, and, sql } = c.orm;
-      const inGroup = filter.groupId ? eq(c.groupId, filter.groupId) : undefined;
+      const inGroup = group ? eq(c.groupId, group) : undefined;
 
       if (c.jsonb) {
-        const match = sql`${c.metadata} @> ${JSON.stringify({ [filter.key]: filter.value })}::jsonb`;
-        const rows: Row[] = await db
-          .select()
-          .from(table)
-          .where(inGroup ? and(inGroup, match) : match)
-          .limit(1);
-        return rows[0] ? toStoredFile(c, rows[0]) : null;
+        const match = sql`${c.metadata} @> ${JSON.stringify({ customMetadata: { [key]: value } })}::jsonb`;
+        const rows: Row[] = await db.select().from(table).where(inGroup ? and(inGroup, match) : match).limit(1);
+        return rows[0] ? toObject(rows[0]) : null;
       }
 
       const query = db.select().from(table);
       const rows: Row[] = await (inGroup ? query.where(inGroup) : query);
-      const row = rows.find((r) => asMeta(r[names.metadata])[filter.key] === filter.value);
-      return row ? toStoredFile(c, row) : null;
+      for (const row of rows) {
+        const object = toObject(row);
+        if (object && object.customMetadata[key] === value) return object;
+      }
+      return null;
     },
   };
 }
 
 export interface ImportUnstorageMetadataOptions {
-  /** Nitro storage mount the unstorage provider wrote to (e.g. `'documents'`). */
+  /** Nitro storage mount the 0.0.x unstorage provider wrote to (e.g. `'documents'`). */
   from: string;
   db: DrizzleDatabase;
   table: Table;
@@ -334,11 +342,12 @@ export interface ImportUnstorageMetadataOptions {
 }
 
 /**
- * One-off migration from the unstorage provider: copies its JSON metadata
- * sidecars (`<groupId>:meta:<id>`) into the Drizzle table, keeping ids and
- * timestamps. Bytes stay where they are — point `createDrizzleProvider`'s
- * `blobs` at the same mount. Rows that already exist are skipped, so it is
- * safe to re-run.
+ * One-off migration from the 0.0.x unstorage provider: converts its JSON
+ * metadata sidecars (`<group>:meta:<id>`) into rows of the Drizzle table,
+ * keeping ids and timestamps. `size` and `etag` are computed from the stored
+ * bytes, which stay where they are — point `createDrizzleProvider`'s `blobs`
+ * at the same mount. Rows that already exist are skipped, so it is safe to
+ * re-run.
  */
 export async function importUnstorageMetadata(
   options: ImportUnstorageMetadataOptions,
@@ -351,37 +360,53 @@ export async function importUnstorageMetadata(
   const metaKeys = (await storage.getKeys()).filter((key) => key.includes(':meta:'));
   let imported = 0;
 
-  for (let i = 0; i < metaKeys.length; i += 100) {
+  for (let i = 0; i < metaKeys.length; i += 50) {
     const batch = await Promise.all(
-      metaKeys.slice(i, i + 100).map(async (key) => {
+      metaKeys.slice(i, i + 50).map(async (key) => {
         const at = key.lastIndexOf(':meta:');
-        const raw = await storage.getItem<FileMeta & { _createdAt?: string; _updatedAt?: string }>(key);
-        return { groupId: key.slice(0, at), id: key.slice(at + ':meta:'.length), raw };
+        const group = key.slice(0, at);
+        const id = key.slice(at + ':meta:'.length);
+        const legacy = await storage.getItem<Record<string, unknown>>(key);
+        const data = await storage.getItemRaw<Uint8Array>(`${group}:data:${id}`);
+        return { group, id, legacy, data: data ? new Uint8Array(data) : null };
       }),
     );
 
-    const ids = batch.map((file) => file.id);
-    const existing: Row[] = await db
-      .select({ id: c.id })
-      .from(table)
-      .where(c.orm.inArray(c.id, ids));
-    const known = new Set(existing.map((row) => String(row.id)));
-
-    const rows = batch
-      .filter((file) => file.raw && !known.has(file.id))
-      .map(({ groupId, id, raw }) => {
-        const { _createdAt, _updatedAt, ...meta } = raw!;
-        return {
-          [names.id]: id,
-          [names.groupId]: groupId,
-          [names.metadata]: meta,
-          ...(c.hasCreatedAt ? { [names.createdAt]: asDate(_createdAt) ?? new Date() } : {}),
-          ...(c.hasUpdatedAt ? { [names.updatedAt]: asDate(_updatedAt) ?? new Date() } : {}),
-        };
+    for (const { group, id, legacy, data } of batch) {
+      if (!legacy || !data || (await db.select({ id: c.id }).from(table).where(c.orm.and(c.orm.eq(c.groupId, group), c.orm.eq(c.id, id))).limit(1)).length) {
+        continue;
+      }
+      const { name, mime, _createdAt, _updatedAt, width, height, ...custom } = legacy as Record<string, unknown> & {
+        name?: string;
+        mime?: string;
+        _createdAt?: string;
+        _updatedAt?: string;
+        width?: number;
+        height?: number;
+      };
+      const uploadedAt = _createdAt ? new Date(_createdAt) : new Date();
+      const object: FileObject = {
+        group,
+        id,
+        size: data.length,
+        contentType: mime || 'application/octet-stream',
+        etag: await computeEtag(data),
+        uploadedAt,
+        updatedAt: _updatedAt ? new Date(_updatedAt) : uploadedAt,
+        ...(name ? { name } : {}),
+        ...(typeof width === 'number' ? { width } : {}),
+        ...(typeof height === 'number' ? { height } : {}),
+        customMetadata: custom,
+      };
+      await db.insert(table).values({
+        [names.id]: id,
+        [names.groupId]: group,
+        [names.metadata]: toStored(object),
+        ...(c.hasCreatedAt ? { [names.createdAt]: object.uploadedAt } : {}),
+        ...(c.hasUpdatedAt ? { [names.updatedAt]: object.updatedAt } : {}),
       });
-
-    if (rows.length) await db.insert(table).values(rows);
-    imported += rows.length;
+      imported++;
+    }
   }
 
   return { imported, skipped: metaKeys.length - imported };

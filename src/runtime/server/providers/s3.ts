@@ -1,24 +1,31 @@
-import type {
-  FileStorageProvider,
-  FileMeta,
-  StoredFile,
-} from '../../../runtime/types';
+import type { ByteRange, FileObject, FileStorageProvider } from '../../../runtime/types';
+import {
+  applyPatch,
+  bytesToStream,
+  deserializeObject,
+  serializeObject,
+  streamToBytes,
+  type SerializedFileObject,
+} from '../utils/objects';
 
 /**
  * Minimal S3 object-store surface the provider needs. Abstracted so the
  * provider can be unit-tested with an in-memory fake (pass `client`), and so
- * the real implementation (aws4fetch) stays isolated.
+ * the real implementation (aws4fetch) stays isolated. It also serves as the
+ * `blobs` store of `createDrizzleProvider`.
  *
- * `listKeys` MUST list with a server-side prefix and paginate through every
- * page — that's the whole point of this provider over unstorage's generic s3
- * driver, which lists the bucket root and caps at 1000 keys.
+ * `listKeys` MUST list with a server-side prefix and page through every
+ * result — unlike unstorage's generic s3 driver, which lists the bucket root
+ * and caps at 1000 keys.
  */
 export interface S3Client {
-  put(key: string, body: Buffer | Uint8Array, contentType?: string): Promise<void>;
-  get(key: string): Promise<Buffer | null>;
+  put(key: string, body: Uint8Array, contentType?: string): Promise<void>;
+  /** The object's bytes (or a range, clamped to its size) as a stream; `null` if missing. */
+  get(key: string, range?: ByteRange): Promise<ReadableStream<Uint8Array> | null>;
   head(key: string): Promise<boolean>;
   delete(key: string): Promise<void>;
-  listKeys(prefix: string): AsyncGenerator<string, void, unknown>;
+  /** Keys under `prefix` in ascending order, optionally only those after `startAfter`. */
+  listKeys(prefix: string, options?: { startAfter?: string }): AsyncGenerator<string, void, unknown>;
 }
 
 export interface S3ProviderOptions {
@@ -35,14 +42,9 @@ export interface S3ProviderOptions {
   client?: S3Client;
 }
 
-type InternalMeta = FileMeta & { _createdAt?: string; _updatedAt?: string };
-
 /**
  * Map over `items` with at most `limit` promises in flight, preserving order.
- * Used to read many meta objects concurrently instead of one-at-a-time — on a
- * remote store (R2/S3) the per-object round-trip latency dominates, so a
- * sequential `for await` over N files is ~N × RTT. Bounded so a huge group
- * doesn't open thousands of sockets at once.
+ * Reading many metadata objects one by one would cost one round-trip each.
  */
 async function mapWithConcurrency<T, R>(
   items: T[],
@@ -57,19 +59,15 @@ async function mapWithConcurrency<T, R>(
       results[index] = await fn(items[index]!, index);
     }
   };
-  const workers = Array.from({ length: Math.min(limit, items.length) || 1 }, worker);
-  await Promise.all(workers);
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) || 1 }, worker));
   return results;
 }
 
 /**
- * S3-backed {@link FileStorageProvider}. Binary data and a JSON metadata
- * sidecar are stored as separate objects per file, mirroring the built-in
- * unstorage provider's semantics — but `list`/`findByMeta` use real S3 prefix
- * listing with continuation pagination, so a group is correctly scoped even
- * inside a large shared bucket.
- *
- * Key layout: `${prefix}${groupId}/data/${id}` and `${prefix}${groupId}/meta/${id}`.
+ * S3-backed {@link FileStorageProvider} (AWS S3, Cloudflare R2, MinIO, …).
+ * Bytes and a JSON metadata object are stored separately per file:
+ * `${prefix}${group}/data/${id}` and `${prefix}${group}/meta/${id}`. Listing
+ * uses S3 prefix listing with `start-after` pagination.
  */
 export function createS3Provider(options: S3ProviderOptions): FileStorageProvider {
   const prefix = options.prefix ? options.prefix.replace(/\/+$/, '') + '/' : '';
@@ -80,171 +78,85 @@ export function createS3Provider(options: S3ProviderOptions): FileStorageProvide
       ? Promise.resolve(options.client)
       : createAwsS3Client(options));
 
-  // Strip leading/trailing slashes so callers can pass `studio` or `/studio`
-  // interchangeably (the IPX integration hands group ids through with a leading
-  // slash). Without this, keys like `/studio/data/x` miss the stored object.
-  const seg = (value: string) => value.replace(/^\/+|\/+$/g, '');
-  const dataKey = (groupId: string, id: string) => `${prefix}${seg(groupId)}/data/${seg(id)}`;
-  const metaKey = (groupId: string, id: string) => `${prefix}${seg(groupId)}/meta/${seg(id)}`;
-  const metaPrefix = (groupId: string) => `${prefix}${seg(groupId)}/meta/`;
+  const dataKey = (group: string, id: string) => `${prefix}${group}/data/${id}`;
+  const metaKey = (group: string, id: string) => `${prefix}${group}/meta/${id}`;
+  const metaPrefix = (group: string) => `${prefix}${group}/meta/`;
 
-  /** `${prefix}${groupId}/meta/${id}` → groupId (groups may contain '/'). */
-  const groupIdFromMetaKey = (key: string) => {
-    const rel = key.slice(prefix.length);
-    return rel.slice(0, rel.lastIndexOf('/meta/'));
-  };
-  const idFromKey = (key: string) => key.slice(key.lastIndexOf('/') + 1);
-
-  const readMeta = async (client: S3Client, key: string): Promise<InternalMeta | null> => {
-    const raw = await client.get(key);
-    if (!raw) return null;
+  const readObject = async (client: S3Client, key: string): Promise<FileObject | null> => {
+    const body = await client.get(key);
+    if (!body) return null;
     try {
-      return JSON.parse(raw.toString('utf8')) as InternalMeta;
-    } catch {
+      return deserializeObject(JSON.parse(new TextDecoder().decode(await streamToBytes(body))) as SerializedFileObject);
+    }
+    catch {
       return null;
     }
   };
-
-  const toStoredFile = (
-    id: string,
-    groupId: string,
-    meta: InternalMeta | null,
-    data?: Buffer,
-  ): StoredFile => ({
-    id,
-    groupId,
-    data: data ?? undefined,
-    meta: stripInternal(meta),
-    createdAt: meta?._createdAt ? new Date(meta._createdAt) : undefined,
-    updatedAt: meta?._updatedAt ? new Date(meta._updatedAt) : undefined,
-  });
+  const writeObject = (client: S3Client, object: FileObject) =>
+    client.put(
+      metaKey(object.group, object.id),
+      new TextEncoder().encode(JSON.stringify(serializeObject(object))),
+      'application/json',
+    );
 
   return {
-    async create(groupId, data, meta) {
-      const client = await getClient();
-      const id = globalThis.crypto.randomUUID();
-
-      await client.put(dataKey(groupId, id), data, meta?.mime);
-
-      if (meta) {
-        const now = new Date().toISOString();
-        await client.put(
-          metaKey(groupId, id),
-          Buffer.from(JSON.stringify({ ...meta, _createdAt: now, _updatedAt: now })),
-          'application/json',
-        );
-      }
-
-      return { id };
+    async head(ref) {
+      return readObject(await getClient(), metaKey(ref.group, ref.id));
     },
 
-    async get(groupId, id) {
-      const client = await getClient();
-      const [data, meta] = await Promise.all([
-        client.get(dataKey(groupId, id)),
-        readMeta(client, metaKey(groupId, id)),
-      ]);
-      if (!data && !meta) return null;
-      return toStoredFile(id, groupId, meta, data ?? undefined);
+    async read(ref, range) {
+      return (await getClient()).get(dataKey(ref.group, ref.id), range);
     },
 
-    async head(groupId, id) {
+    async write(object, data) {
       const client = await getClient();
-      const meta = await readMeta(client, metaKey(groupId, id));
-      if (!meta && !(await client.head(dataKey(groupId, id)))) return null;
-      return toStoredFile(id, groupId, meta);
+      // Bytes first: metadata never points at bytes that weren't written.
+      await client.put(dataKey(object.group, object.id), data, object.contentType);
+      await writeObject(client, object);
     },
 
-    async getData(groupId, id) {
-      return (await getClient()).get(dataKey(groupId, id));
+    async updateMeta(ref, patch) {
+      const client = await getClient();
+      const existing = await readObject(client, metaKey(ref.group, ref.id));
+      if (!existing) return null;
+      const updated = applyPatch(existing, patch);
+      await writeObject(client, updated);
+      return updated;
     },
 
-    async getMeta(id) {
-      // No groupId: scan meta objects (bounded by `prefix` when set). The
-      // serving path uses get/getData (which carry a groupId), so this is the
-      // only non-group-scoped lookup.
+    async remove(refs) {
       const client = await getClient();
-      for await (const key of client.listKeys(prefix)) {
-        if (key.endsWith(`/meta/${id}`)) {
-          return stripInternal(await readMeta(client, key));
-        }
-      }
-      return null;
+      await mapWithConcurrency(refs.flatMap((ref) => [metaKey(ref.group, ref.id), dataKey(ref.group, ref.id)]), 16, (key) => client.delete(key));
     },
 
-    async list(groupId) {
+    async list(group, { limit, cursor, prefix: idPrefix }) {
       const client = await getClient();
-      // Enumerate the group's meta keys (cheap paginated LIST), then read every
-      // meta object in parallel. The previous sequential read was one blocking
-      // GET per file, so listing a group cost ~N round-trips to the store.
+      const base = metaPrefix(group);
       const keys: string[] = [];
-      for await (const key of client.listKeys(metaPrefix(groupId))) keys.push(key);
-      const metas = await mapWithConcurrency(keys, 32, (key) => readMeta(client, key));
-      const files: StoredFile[] = [];
-      for (let i = 0; i < keys.length; i++) {
-        const meta = metas[i];
-        if (!meta) continue;
-        files.push(toStoredFile(idFromKey(keys[i]!), groupId, meta));
+      // Fetch one key past the page to know whether there's more.
+      for await (const key of client.listKeys(base + (idPrefix ?? ''), { startAfter: cursor ? base + cursor : undefined })) {
+        // Nested groups share the prefix; only direct children are this group's files.
+        if (key.slice(base.length).includes('/')) continue;
+        keys.push(key);
+        if (keys.length > limit) break;
       }
-      return files;
+      const page = keys.slice(0, limit);
+      const objects = (await mapWithConcurrency(page, 32, (key) => readObject(client, key)))
+        .filter((object): object is FileObject => !!object);
+      const hasMore = keys.length > limit;
+      return { objects, hasMore, cursor: hasMore ? page[page.length - 1]!.slice(base.length) : undefined };
     },
 
-    async update(id, meta) {
+    async findByMeta({ key, value, group }) {
       const client = await getClient();
-      for await (const key of client.listKeys(prefix)) {
-        if (!key.endsWith(`/meta/${id}`)) continue;
-        const existing = (await readMeta(client, key)) ?? ({} as InternalMeta);
-        await client.put(
-          key,
-          Buffer.from(
-            JSON.stringify({ ...existing, ...meta, _updatedAt: new Date().toISOString() }),
-          ),
-          'application/json',
-        );
-        return;
-      }
-      throw new Error(`File metadata not found: ${id}`);
-    },
-
-    async remove(groupId, id) {
-      const client = await getClient();
-      await Promise.all([
-        client.delete(dataKey(groupId, id)),
-        client.delete(metaKey(groupId, id)),
-      ]);
-    },
-
-    async clear(groupId) {
-      const client = await getClient();
-      for await (const key of client.listKeys(`${prefix}${seg(groupId)}/`)) {
-        await client.delete(key);
-      }
-    },
-
-    async has(groupId, id) {
-      return (await getClient()).head(dataKey(groupId, id));
-    },
-
-    async findByMeta(filter) {
-      const client = await getClient();
-      const scanPrefix = filter.groupId ? metaPrefix(filter.groupId) : prefix;
-      for await (const key of client.listKeys(scanPrefix)) {
-        if (!key.includes('/meta/')) continue;
-        const meta = await readMeta(client, key);
-        if (!meta) continue;
-        if (meta[filter.key] === filter.value) {
-          return toStoredFile(idFromKey(key), groupIdFromMetaKey(key), meta);
-        }
+      for await (const objectKey of client.listKeys(group ? metaPrefix(group) : prefix)) {
+        if (!objectKey.includes('/meta/')) continue;
+        const object = await readObject(client, objectKey);
+        if (object && object.customMetadata[key] === value) return object;
       }
       return null;
     },
   };
-}
-
-function stripInternal(meta: InternalMeta | null): FileMeta {
-  if (!meta) return { name: '', mime: '', type: '', version: 0 };
-  const { _createdAt, _updatedAt, ...rest } = meta;
-  return rest as FileMeta;
 }
 
 /**
@@ -258,11 +170,11 @@ export function createS3Client(
   const getClient = () => (clientPromise ??= createAwsS3Client(options));
   return {
     put: async (key, body, contentType) => (await getClient()).put(key, body, contentType),
-    get: async (key) => (await getClient()).get(key),
+    get: async (key, range) => (await getClient()).get(key, range),
     head: async (key) => (await getClient()).head(key),
     delete: async (key) => (await getClient()).delete(key),
-    async *listKeys(keyPrefix) {
-      yield* (await getClient()).listKeys(keyPrefix);
+    async *listKeys(keyPrefix, listOptions) {
+      yield* (await getClient()).listKeys(keyPrefix, listOptions);
     },
   };
 }
@@ -302,20 +214,30 @@ async function createAwsS3Client(options: S3ProviderOptions): Promise<S3Client> 
     async put(key, body, contentType) {
       const res = await signedFetch(objectUrl(key), {
         method: 'PUT',
-        body: body as BodyInit,
+        body: body as Uint8Array<ArrayBuffer>,
         headers: contentType ? { 'content-type': contentType } : undefined,
       });
       if (!res.ok) {
         throw new Error(`[ablage] S3 PUT ${key}: ${res.status} ${res.statusText}`);
       }
     },
-    async get(key) {
-      const res = await signedFetch(objectUrl(key));
+    async get(key, range) {
+      if (range?.length === 0) {
+        // An empty range can't be expressed as a Range header; just check existence.
+        const res = await signedFetch(objectUrl(key), { method: 'HEAD' });
+        return res.ok ? bytesToStream(new Uint8Array()) : null;
+      }
+      const headers = range
+        ? { range: `bytes=${range.offset}-${range.length === undefined ? '' : range.offset + range.length - 1}` }
+        : undefined;
+      const res = await signedFetch(objectUrl(key), { headers });
       if (res.status === 404) return null;
+      // Offset past the end: an empty range, as the provider contract asks.
+      if (res.status === 416) return bytesToStream(new Uint8Array());
       if (!res.ok) {
         throw new Error(`[ablage] S3 GET ${key}: ${res.status} ${res.statusText}`);
       }
-      return Buffer.from(await res.arrayBuffer());
+      return res.body ?? bytesToStream(new Uint8Array());
     },
     async head(key) {
       const res = await signedFetch(objectUrl(key), { method: 'HEAD' });
@@ -331,13 +253,14 @@ async function createAwsS3Client(options: S3ProviderOptions): Promise<S3Client> 
         throw new Error(`[ablage] S3 DELETE ${key}: ${res.status} ${res.statusText}`);
       }
     },
-    async *listKeys(keyPrefix) {
+    async *listKeys(keyPrefix, listOptions) {
       let token: string | undefined;
       do {
         const url = new URL(base);
         url.searchParams.set('list-type', '2');
         if (keyPrefix) url.searchParams.set('prefix', keyPrefix);
         if (token) url.searchParams.set('continuation-token', token);
+        else if (listOptions?.startAfter) url.searchParams.set('start-after', listOptions.startAfter);
 
         const res = await signedFetch(url.toString());
         if (!res.ok) {

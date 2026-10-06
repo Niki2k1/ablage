@@ -25,7 +25,7 @@ export default defineEventHandler(async (event) => {
   const id = parts.pop()!;
   const groupId = parts.join('/');
 
-  if (modifiers === '_') return sendStoredFile(event, groupId, id);
+  if (modifiers === '_') return sendStoredFile(event, { group: groupId, id });
 
   const config = useImageService()!;
   const origin = config.sourceURL ?? getRequestURL(event).origin;

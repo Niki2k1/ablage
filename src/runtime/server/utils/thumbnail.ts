@@ -57,7 +57,7 @@ async function renderPdfPage(data: Uint8Array, page: number, width: number): Pro
  *
  * ```ts
  * const thumb = await generateThumbnail(file.data, file.type, { width: 300, height: 200 })
- * if (thumb) await storage.upload(group, thumb.data, { meta: { ...meta, mime: thumb.mime } })
+ * if (thumb) await storage.put(group, thumb.data, { contentType: thumb.mime, name: `thumb_${file.name}` })
  * ```
  */
 export async function generateThumbnail(

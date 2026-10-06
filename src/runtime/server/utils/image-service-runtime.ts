@@ -3,11 +3,11 @@ import { useRuntimeConfig } from 'nitropack/runtime';
 // @ts-expect-error virtual module injected by the module
 import { imageService, ipxRoute } from '#ablage-image';
 import type {
-  FileMeta,
   ImageTransformOptions,
   ImageTransformResult,
 } from '../../../runtime/types';
 import { useFileStorageProvider } from '../provider';
+import { computeEtag } from './objects';
 import {
   imageServiceURL,
   sourceURL,
@@ -44,9 +44,9 @@ export function useImageService(): ImageServiceConfig | null {
  */
 export async function transformWithService(
   config: ImageServiceConfig,
-  data: Buffer | Uint8Array,
+  data: Uint8Array,
   options: ImageTransformOptions,
-  meta?: FileMeta,
+  contentType?: string,
 ): Promise<ImageTransformResult> {
   if (!config.sourceURL) {
     throw new Error(
@@ -54,12 +54,18 @@ export async function transformWithService(
     );
   }
   const provider = useFileStorageProvider();
-  const staged = await provider.create(STAGING_GROUP, data, {
-    name: meta?.name ?? '',
-    mime: meta?.mime ?? '',
-    type: 'staging',
-    version: 0,
-  });
+  const now = new Date();
+  const staged = {
+    group: STAGING_GROUP,
+    id: crypto.randomUUID(),
+    size: data.length,
+    contentType: contentType || 'application/octet-stream',
+    etag: await computeEtag(data),
+    uploadedAt: now,
+    updatedAt: now,
+    customMetadata: {},
+  };
+  await provider.write(staged, data);
   try {
     const url = await imageServiceURL(
       config,
@@ -82,6 +88,6 @@ export async function transformWithService(
     };
   }
   finally {
-    await provider.remove(STAGING_GROUP, staged.id);
+    await provider.remove([staged]);
   }
 }

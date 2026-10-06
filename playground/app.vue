@@ -54,18 +54,18 @@
 
     <ul v-if="files.length" style="margin-top: 1rem">
       <li v-for="file in files" :key="file.id" style="margin-bottom: 1rem">
-        <strong>{{ file.meta.name }}</strong> ({{ file.meta.mime }}) — {{ file.id }}
-        <div v-if="file.meta.mime?.startsWith('image/')" style="margin-top: 0.5rem; display: flex; gap: 1rem">
+        <strong>{{ file.name }}</strong> ({{ file.contentType }}, {{ file.size }} bytes) — {{ file.id }}
+        <div v-if="file.contentType.startsWith('image/')" style="margin-top: 0.5rem; display: flex; gap: 1rem">
           <NuxtImg
             provider="ablage"
-            :src="`${file.groupId}/${file.id}`"
+            :src="`${file.group}/${file.id}`"
             :width="96"
             :height="96"
             fit="cover"
             format="webp"
             alt="thumbnail via IPX"
           />
-          <code>provider=ablage src={{ file.groupId }}/{{ file.id }}</code>
+          <code>provider=ablage src={{ file.group }}/{{ file.id }}</code>
         </div>
       </li>
     </ul>
@@ -77,7 +77,7 @@ const groupId = ref('test-group');
 const selectedFile = ref<File | null>(null);
 const processImage = ref(false);
 const uploadResult = ref<{ id: string } | null>(null);
-const files = ref<Array<{ id: string; groupId: string; meta: { name: string; mime: string }; createdAt?: string; updatedAt?: string }>>([]);
+const files = ref<Array<{ id: string; group: string; name?: string; contentType: string; size: number }>>([]);
 
 function onFileSelect(e: Event) {
   const input = e.target as HTMLInputElement;
